@@ -248,6 +248,7 @@ def select_llm_provider() -> tuple[str, str | None]:
         ("Qwen", "qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
         ("GLM", "glm", "https://open.bigmodel.cn/api/paas/v4/"),
         ("MiniMax", "minimax", "https://api.minimax.io/v1"),
+        ("Groq (Free tier — Llama 3.3 / Llama 4)", "groq", "https://api.groq.com/openai/v1"),
         ("OpenRouter", "openrouter", "https://openrouter.ai/api/v1"),
         ("Azure OpenAI", "azure", None),
         ("Ollama", "ollama", ollama_url),

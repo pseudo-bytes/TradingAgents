@@ -73,6 +73,26 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 }
 
 
+# Groq — OpenAI-compatible endpoint with free tier (rate-limited).
+# Source: console.groq.com/docs/models (production models only).
+# llama-3.3-70b-versatile is the recommended default for quality;
+# llama-3.1-8b-instant is the fastest/cheapest option.
+_GROQ_MODELS: Dict[str, List[ModelOption]] = {
+    "quick": [
+        ("Llama 3.1 8B Instant - Fastest, free tier (rate-limited)", "llama-3.1-8b-instant"),
+        ("Llama 3.3 70B SpecDec - Fast with speculative decoding", "llama-3.3-70b-specdec"),
+        ("Llama 4 Scout 17B - Meta Llama 4, low latency", "meta-llama/llama-4-scout-17b-16e-instruct"),
+        ("Custom model ID", "custom"),
+    ],
+    "deep": [
+        ("Llama 3.3 70B Versatile - Best quality, free tier", "llama-3.3-70b-versatile"),
+        ("Llama 4 Maverick 17B - Meta Llama 4, strong reasoning", "meta-llama/llama-4-maverick-17b-128e-instruct"),
+        ("Llama 3.1 70B Versatile - Previous-gen 70B", "llama-3.1-70b-versatile"),
+        ("Custom model ID", "custom"),
+    ],
+}
+
+
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
@@ -153,6 +173,8 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # so the two provider keys share one model list.
     "minimax": _MINIMAX_MODELS,
     "minimax-cn": _MINIMAX_MODELS,
+    # Groq: fast inference with free tier (rate-limited).
+    "groq": _GROQ_MODELS,
     # OpenRouter: fetched dynamically. Azure: any deployed model name.
     # Ollama display labels intentionally omit a "local" marker — the
     # endpoint is now configurable via OLLAMA_BASE_URL, so the same labels
