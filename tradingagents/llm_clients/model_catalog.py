@@ -80,7 +80,7 @@ _MINIMAX_MODELS: Dict[str, List[ModelOption]] = {
 _GROQ_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
         ("Llama 3.1 8B Instant - Fastest, free tier (rate-limited)", "llama-3.1-8b-instant"),
-        ("Llama 3.3 70B SpecDec - Fast with speculative decoding", "llama-3.3-70b-specdec"),
+        ("Llama 3.3 70B Versatile - Balanced speed and quality", "llama-3.3-70b-versatile"),
         ("Llama 4 Scout 17B - Meta Llama 4, low latency", "meta-llama/llama-4-scout-17b-16e-instruct"),
         ("Custom model ID", "custom"),
     ],
