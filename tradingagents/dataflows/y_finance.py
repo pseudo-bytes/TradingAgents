@@ -38,10 +38,11 @@ def get_YFin_data_online(
         if col in data.columns:
             data[col] = data[col].round(2)
 
-    # Cap rows sent to the LLM to stay within free-tier token limits.
-    # Indicators are computed from a separate 5-year fetch, so this is safe.
-    max_rows = get_config().get("stock_data_max_rows", 30)
-    data = data.tail(max_rows)
+    # Only cap rows if explicitly configured (e.g. for low-TPM free tiers).
+    # Leaving this None preserves the full date range and analysis quality.
+    max_rows = get_config().get("stock_data_max_rows")
+    if max_rows:
+        data = data.tail(max_rows)
 
     # Convert DataFrame to CSV string
     csv_string = data.to_csv()

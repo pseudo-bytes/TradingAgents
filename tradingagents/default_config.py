@@ -79,12 +79,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
-    # Row cap for stock price CSV sent to the LLM. Lower values reduce token
-    # usage significantly (each row ~15 tokens). 30 is sufficient for trend
-    # analysis; raise to 90 on paid tiers with higher TPM limits.
-    "stock_data_max_rows": 30,
-    "news_article_limit": 5,              # max articles per ticker (ticker-news)
-    "global_news_article_limit": 5,       # max articles for global/macro news
+    # Optional cap on stock price CSV rows sent to the LLM. None = no cap (default).
+    # Only set this if you're on a low-TPM tier and accept reduced analysis quality.
+    "stock_data_max_rows": None,
+    "news_article_limit": 20,             # max articles per ticker (ticker-news)
+    "global_news_article_limit": 10,      # max articles for global/macro news
     "global_news_lookback_days": 7,       # macro news lookback window
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.
