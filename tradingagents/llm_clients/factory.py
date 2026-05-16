@@ -1,15 +1,16 @@
+"""Factory for LLM clients.
+
+Resolves the provider via the registry and instantiates the right
+client class. OpenAIClient takes a `provider` kwarg because one
+class serves many OpenAI-compatible providers (it consults that
+kwarg to pick base URL / API key env). Other client classes are
+provider-specific and don't need it; we don't pass it to them.
+"""
+
 from typing import Optional
 
 from .base_client import BaseLLMClient
-
-# Providers that use the OpenAI-compatible chat completions API
-_OPENAI_COMPATIBLE = (
-    "openai", "xai", "deepseek",
-    "qwen", "qwen-cn",
-    "glm", "glm-cn",
-    "minimax", "minimax-cn",
-    "ollama", "openrouter", "groq",
-)
+from .provider_registry import PROVIDER_REGISTRY
 
 
 def create_llm_client(
@@ -18,40 +19,42 @@ def create_llm_client(
     base_url: Optional[str] = None,
     **kwargs,
 ) -> BaseLLMClient:
-    """Create an LLM client for the specified provider.
-
-    Provider modules are imported lazily so that simply importing this
-    factory (e.g. during test collection) does not pull in heavy LLM SDKs
-    or fail when their API keys are absent.
+    """Create an LLM client for the given provider.
 
     Args:
-        provider: LLM provider name
-        model: Model name/identifier
-        base_url: Optional base URL for API endpoint
-        **kwargs: Additional provider-specific arguments
+        provider: Provider name (case-insensitive).
+        model: Model identifier.
+        base_url: Optional override for the provider's default endpoint.
+        **kwargs: Forwarded to the underlying client class.
 
     Returns:
-        Configured BaseLLMClient instance
+        Configured BaseLLMClient instance.
 
     Raises:
-        ValueError: If provider is not supported
+        ValueError: If the provider is not registered.
     """
     provider_lower = provider.lower()
 
-    if provider_lower in _OPENAI_COMPATIBLE:
-        from .openai_client import OpenAIClient
-        return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)
+    if provider_lower not in PROVIDER_REGISTRY:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
 
-    if provider_lower == "anthropic":
-        from .anthropic_client import AnthropicClient
-        return AnthropicClient(model, base_url, **kwargs)
+    config = PROVIDER_REGISTRY[provider_lower]
+    effective_base_url = base_url or config.base_url
 
-    if provider_lower == "google":
-        from .google_client import GoogleClient
-        return GoogleClient(model, base_url, **kwargs)
-
-    if provider_lower == "azure":
-        from .azure_client import AzureOpenAIClient
-        return AzureOpenAIClient(model, base_url, **kwargs)
-
-    raise ValueError(f"Unsupported LLM provider: {provider}")
+    # OpenAIClient handles many OpenAI-compatible providers, so it needs
+    # the provider name to resolve its own internal base-URL/api-key
+    # mappings. Other client classes are provider-specific and accept
+    # only (model, base_url, **kwargs).
+    from .openai_client import OpenAIClient
+    if config.client_class is OpenAIClient:
+        return config.client_class(
+            model=model,
+            base_url=effective_base_url,
+            provider=provider_lower,
+            **kwargs,
+        )
+    return config.client_class(
+        model=model,
+        base_url=effective_base_url,
+        **kwargs,
+    )
