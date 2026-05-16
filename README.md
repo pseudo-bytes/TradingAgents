@@ -150,8 +150,12 @@ export ZHIPU_CN_API_KEY=...        # GLM via BigModel (China, open.bigmodel.cn)
 export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io, M2.x, 204K ctx)
 export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com, M2.x, 204K ctx)
 export OPENROUTER_API_KEY=...      # OpenRouter
+export GROQ_API_KEY=...            # Groq (free tier — Llama 3.3 / Llama 4)
 export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
 ```
+
+For detailed provider setup, architecture, and a feature support matrix,
+see [`docs/providers/`](docs/providers/README.md).
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
