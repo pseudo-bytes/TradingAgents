@@ -105,3 +105,30 @@ def test_capabilities_dataclass_is_frozen():
     caps = get_capabilities("deepseek-chat")
     with pytest.raises(Exception):
         caps.supports_tool_choice = False  # type: ignore[misc]
+
+
+@pytest.mark.unit
+class TestGroqCapabilities:
+    """Verify capability resolution for Groq Llama models.
+
+    Groq Llama models are not in _BY_ID or _BY_PATTERN, so they fall through
+    to the permissive _DEFAULT profile (tools + json_object + function_calling).
+    """
+
+    def test_groq_llama_3_3_uses_default(self):
+        """llama-3.3-70b-versatile uses default capabilities (full support)."""
+        caps = get_capabilities("llama-3.3-70b-versatile")
+        assert caps.supports_tool_choice is True
+        assert caps.supports_json_mode is True
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_groq_llama_3_1_uses_default(self):
+        """llama-3.1-8b-instant uses default capabilities."""
+        caps = get_capabilities("llama-3.1-8b-instant")
+        assert caps.supports_tool_choice is True
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_groq_llama_4_uses_default(self):
+        """Llama 4 models use default capabilities."""
+        caps = get_capabilities("meta-llama/llama-4-scout-17b-16e-instruct")
+        assert caps.supports_tool_choice is True
