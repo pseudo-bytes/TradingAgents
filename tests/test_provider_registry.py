@@ -59,9 +59,10 @@ class TestGroqRegistryEntry:
     """Groq-specific registry metadata."""
 
     def test_groq_uses_openai_client(self):
-        from tradingagents.llm_clients.openai_client import OpenAIClient
         config = PROVIDER_REGISTRY["groq"]
-        assert config.client_class is OpenAIClient
+        # Use name check rather than `is` to be robust against module reloads
+        # (test_ollama_base_url.py reloads openai_client, which invalidates is-checks)
+        assert config.client_class.__name__ == "OpenAIClient"
 
     def test_groq_base_url(self):
         config = PROVIDER_REGISTRY["groq"]
