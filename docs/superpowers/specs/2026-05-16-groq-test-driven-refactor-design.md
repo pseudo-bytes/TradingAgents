@@ -32,15 +32,21 @@
 
 ```python
 # tradingagents/llm_clients/provider_registry.py
+from dataclasses import dataclass
+from typing import Type, Optional, Dict, List
+
 @dataclass
 class ProviderConfig:
-    """Metadata for a single provider."""
+    """Metadata for a single provider.
+    
+    client_class determines everything (OpenAIClient for OpenAI-compatible,
+    AnthropicClient for Anthropic, etc.); no need for is_openai_compatible flag.
+    """
     name: str                          # "groq", "openai", etc.
-    client_class: Type[BaseLLMClient]  # The client to instantiate
-    base_url: Optional[str]            # Default API endpoint
+    client_class: Type[BaseLLMClient]  # The client to instantiate (determines impl)
+    base_url: Optional[str]            # Default API endpoint (can be overridden)
     api_key_env: Optional[str]         # ENV var for API key
     models: Dict[str, List[ModelOption]]  # Quick/deep model lists
-    is_openai_compatible: bool         # Whether to use OpenAIClient
 
 PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     "groq": ProviderConfig(
@@ -49,7 +55,6 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         base_url="https://api.groq.com/openai/v1",
         api_key_env="GROQ_API_KEY",
         models=_GROQ_MODELS,
-        is_openai_compatible=True,
     ),
     "openai": ProviderConfig(...),
     # ... etc
@@ -85,6 +90,29 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
 | **Async Invoke** | ? TBD | LangChain ChatOpenAI async support |
 | **Streaming** | ? TBD | Does Groq support streaming? LangChain stream methods? |
 
+**Research before Phase 1:** Check Groq API docs for:
+- Tool calling support (tools array + tool_choice parameter)
+- Structured output (JSON mode vs JSON schema — Llama models may not support schema)
+- Streaming (does Groq support streaming responses?)
+
+**Capabilities.py update:** Based on findings, add Groq models to capabilities matrix:
+```python
+# If all Groq models support tools + JSON mode (best case):
+_DEFAULT = ModelCapabilities(
+    supports_tool_choice=True,
+    supports_json_mode=True,
+    supports_json_schema=False,  # Llama may not support schema
+    preferred_structured_method="function_calling",
+)
+
+# If some models differ (e.g., 8B vs 70B):
+_BY_ID: dict[str, ModelCapabilities] = {
+    "llama-3.1-8b-instant": ModelCapabilities(...),
+    "llama-3.3-70b-versatile": ModelCapabilities(...),
+    # ... etc
+}
+```
+
 **Test coverage:** One integration test per feature; each test is isolated and can run without API calls (mocked).
 
 ---
@@ -105,7 +133,24 @@ tests/llm_clients/
 
 ### 3.2 Test Strategy
 
-**Before implementation:** Write tests with mocked API responses (use `unittest.mock` or `pytest-vcr` for recorded responses).
+**Mocking approach:** Tests use `unittest.mock.patch()` to mock the OpenAI client's HTTP layer (no live API calls):
+```python
+# Example mocking pattern:
+@patch("langchain_openai.ChatOpenAI._make_request")
+def test_groq_tools(mock_request):
+    # Mock fixture: recorded response from Groq API for tool call
+    mock_request.return_value = {
+        "choices": [{"message": {"tool_calls": [...]}}]
+    }
+    
+    client = create_llm_client("groq", "llama-3.3-70b-versatile")
+    response = client.invoke([...with tools...])
+    
+    # Verify request format (tools array sent)
+    assert "tools" in mock_request.call_args[1]
+```
+
+**Test isolation:** Each test is independent; mocks are function-scoped (no cross-test pollution).
 
 **Test order (by implementation priority):**
 1. Registry tests (most basic)
@@ -115,10 +160,11 @@ tests/llm_clients/
 5. Async/streaming
 
 Each test:
-- Uses mocked Groq API responses
-- Verifies client instantiation with Groq config
-- Checks request format (e.g., tools array, response_format field)
+- Mocks the OpenAI client's HTTP layer (no live calls)
+- Verifies client instantiation with Groq config from registry
+- Checks request format sent to Groq (e.g., tools array, response_format field)
 - Validates response parsing (content normalization)
+- **CI runs offline:** No API keys needed in test environment
 
 ---
 
@@ -170,10 +216,12 @@ docs/providers/
 - Mocked API responses for offline testing
 
 ### Phase 2: Provider Registry Refactor
-- Create `provider_registry.py`
-- Update `factory.py` to use registry
-- Move provider metadata into registry
-- Ensure backward compatibility (all tests still pass)
+- Create `provider_registry.py` with ProviderConfig dataclass and PROVIDER_REGISTRY dict
+- Refactor `factory.py` to use registry (replace provider conditionals)
+- Move provider metadata from factory/api_key_env into registry
+- **Backward compatibility:** Old API surface (`create_llm_client(...)`) still works; factory internally delegates to registry
+- **Migration path:** Existing callers need zero changes; internal factory code is simplified from ~50 lines to ~10
+- Verify all tests pass (both old unit tests and new registry tests)
 
 ### Phase 3: Groq Feature Verification & Implementation
 - Run tests against Groq models
@@ -205,19 +253,33 @@ docs/providers/
 
 ## 7. Assumptions & Constraints
 
-- **Groq API compatibility:** Assumed to support tools & structured output (Llama 3.3+ should support both)
+- **Groq API compatibility:** Will verify before Phase 1; assume Llama 3.3+ supports tools, JSON mode; JSON schema unknown
+- **Tool choice support:** Will research; if Groq doesn't support `tool_choice`, update capabilities.py accordingly
 - **LangChain version:** Current version supports async/streaming for OpenAI-compatible endpoints
-- **Testing:** Offline tests use mocked responses; no live API calls in CI
+- **Testing:** Offline tests use mocked responses; no live API calls in CI; tests are runnable without API keys
 - **Future extensibility:** Registry pattern allows adding 10+ providers without code churn
+- **Backward compatibility:** Existing `create_llm_client()` API remains unchanged; old conditionals in factory are replaced, not augmented
+
+## 7.1 Pre-Phase-1 Research (BLOCKING)
+
+Before writing tests, answer:
+1. Check Groq API documentation: Does it support `tools` array + `tool_choice` parameter?
+2. Check Groq API documentation: Does it support `response_format={"type": "json_mode"}`? JSON schema?
+3. Verify LangChain's ChatOpenAI can stream/async with Groq endpoint
+
+(These answers directly inform the mocks we write and the capabilities matrix.)
 
 ---
 
-## 8. Open Questions
+## 8. Open Questions & Decisions
 
+### Questions (answer before Phase 1)
 1. **Tool choice parameter:** Does Groq's Llama models support `tool_choice="auto"` or only `tools=[]`?
 2. **JSON schema:** Does Groq support `response_format={"type": "json_schema", "schema": ...}` or only JSON mode?
-3. **Rate limits:** Should we document Groq's free-tier rate limits in the guide?
-4. **Custom base URL:** Should users be able to override Groq's endpoint (like Ollama)?
+
+### Decisions (already made)
+3. **Rate limits:** ✅ Document Groq's free-tier rate limits in `groq-setup-and-usage.md`
+4. **Custom base URL:** ✅ Yes, users can override via `create_llm_client(..., base_url="...")` (registry default is override-able). Same pattern as current code.
 
 ---
 
