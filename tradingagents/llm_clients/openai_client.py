@@ -1,13 +1,18 @@
 import os
+import time
+import logging
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
+import openai
 
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
 from .validators import validate_model
+
+logger = logging.getLogger(__name__)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
@@ -30,7 +35,25 @@ class NormalizedChatOpenAI(ChatOpenAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        # Retry on rate-limit errors (413 token limit, 429 rate limit).
+        # Identical result — just waits and retries rather than crashing.
+        max_retries, delay = 5, 60
+        for attempt in range(max_retries):
+            try:
+                return normalize_content(super().invoke(input, config, **kwargs))
+            except openai.RateLimitError as e:
+                if attempt == max_retries - 1:
+                    raise
+                logger.warning(
+                    "Rate limit hit (attempt %d/%d): %s — retrying in %ds",
+                    attempt + 1, max_retries, e, delay,
+                )
+                time.sleep(delay)
+            except openai.BadRequestError as e:
+                # 413 token-too-large: retrying won't help, re-raise immediately
+                if "413" in str(e) or "too large" in str(e).lower():
+                    raise
+                raise
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)
