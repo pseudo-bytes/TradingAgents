@@ -17,6 +17,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_STOCK_DATA_MAX_ROWS":  "stock_data_max_rows",
+    "TRADINGAGENTS_NEWS_ARTICLE_LIMIT":   "news_article_limit",
 }
 
 
@@ -77,8 +79,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # News / data fetching parameters
     # Increase for longer lookback strategies or to broaden macro coverage;
     # decrease to reduce token usage in agent prompts.
-    "news_article_limit": 20,             # max articles per ticker (ticker-news)
-    "global_news_article_limit": 10,      # max articles for global/macro news
+    # Row cap for stock price CSV sent to the LLM. Lower values reduce token
+    # usage significantly (each row ~15 tokens). 30 is sufficient for trend
+    # analysis; raise to 90 on paid tiers with higher TPM limits.
+    "stock_data_max_rows": 30,
+    "news_article_limit": 5,              # max articles per ticker (ticker-news)
+    "global_news_article_limit": 5,       # max articles for global/macro news
     "global_news_lookback_days": 7,       # macro news lookback window
     # Search queries used by get_global_news for macro headlines. Extend or
     # replace to broaden geographic / sector coverage.

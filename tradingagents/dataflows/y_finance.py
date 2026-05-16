@@ -5,6 +5,7 @@ import pandas as pd
 import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
+from .config import get_config
 
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -37,12 +38,17 @@ def get_YFin_data_online(
         if col in data.columns:
             data[col] = data[col].round(2)
 
+    # Cap rows sent to the LLM to stay within free-tier token limits.
+    # Indicators are computed from a separate 5-year fetch, so this is safe.
+    max_rows = get_config().get("stock_data_max_rows", 30)
+    data = data.tail(max_rows)
+
     # Convert DataFrame to CSV string
     csv_string = data.to_csv()
 
     # Add header information
     header = f"# Stock data for {symbol.upper()} from {start_date} to {end_date}\n"
-    header += f"# Total records: {len(data)}\n"
+    header += f"# Showing most recent {len(data)} records\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
     return header + csv_string
