@@ -6,7 +6,7 @@
 
 **Architecture:** Test-driven refactor — write tests following existing repo patterns (direct client instantiation + payload/bound-kwarg inspection), then add a provider registry as a single source of truth for metadata, then verify Groq features work. Backward compatible with existing factory API.
 
-**Tech Stack:** LangChain (ChatOpenAI), pytest (test runner with `unit` marker), dataclasses (ProviderConfig), pytest-asyncio (new dep for async tests)
+**Tech Stack:** LangChain (ChatOpenAI), pytest (test runner with `unit` marker), dataclasses (ProviderConfig). No new dependencies required.
 
 **Repository conventions verified:**
 - Tests are FLAT under `tests/` (no subdirectories)
@@ -57,62 +57,7 @@ Notes: __
 
 ---
 
-### Task 0.2: Add pytest-asyncio Dependency
-
-**Files:**
-- Modify: `pyproject.toml`
-
-- [ ] **Step 1: Add pytest-asyncio to pyproject.toml**
-
-Open `pyproject.toml` and add `pytest-asyncio` to dependencies. Also configure `asyncio_mode`:
-
-```toml
-[project]
-dependencies = [
-    ...existing...
-    "pytest-asyncio>=0.23.0",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-ra --strict-markers"
-asyncio_mode = "auto"        # NEW — enables auto-detection of async tests
-markers = [
-    "unit: fast isolated unit tests",
-    "integration: tests requiring external services",
-    "smoke: quick sanity-check tests",
-]
-filterwarnings = [
-    "ignore::DeprecationWarning",
-]
-```
-
-- [ ] **Step 2: Install the dependency**
-
-```bash
-pip install pytest-asyncio
-# Or with uv:
-uv sync
-```
-
-- [ ] **Step 3: Verify it works**
-
-```bash
-pytest --co tests/ 2>&1 | tail -5
-```
-
-Expected: Test collection succeeds, no asyncio-related errors.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add pyproject.toml
-git commit -m "build: add pytest-asyncio for async test support"
-```
-
----
-
-### Task 0.3: Update conftest.py with GROQ_API_KEY
+### Task 0.2: Update conftest.py with GROQ_API_KEY
 
 **Files:**
 - Modify: `tests/conftest.py`
@@ -141,6 +86,15 @@ _API_KEY_ENV_VARS = (
 )
 ```
 
+**Note on conftest behavior:** The autouse fixture uses
+`monkeypatch.setenv(var, os.environ.get(var, "placeholder"))`. If the
+developer running tests has a real `GROQ_API_KEY` in their shell, that
+real value is propagated (not overwritten with "placeholder"). The
+`test_missing_api_key_raises` test handles this by explicitly calling
+`monkeypatch.delenv("GROQ_API_KEY", raising=False)` — both monkeypatch
+operations share the same function-scoped fixture, so removal works
+regardless of who set the value first.
+
 - [ ] **Step 2: Commit**
 
 ```bash
@@ -150,7 +104,15 @@ git commit -m "test: add GROQ_API_KEY to conftest dummy-key fixture"
 
 ---
 
-## Phase 1: Test Writing (Write Tests First — TDD)
+## Phase 1: Verification Tests (Tests First)
+
+**Note on TDD vs verification:** Groq already routes through `OpenAIClient`
+in the current code (`groq` is in `_OPENAI_COMPATIBLE`). Most tests in
+Tasks 1-4 will **PASS on first run** — they document and protect existing
+behavior rather than driving new implementation. The genuinely failing
+test is Task 5 (registry), which forces Phase 2's implementation.
+This is verification-driven development, not strict TDD — both are valid
+strategies for solidifying integration of existing code.
 
 **Test directory:** `tests/` (flat — no subdirectories)  
 **Test pattern:** Follow `test_minimax.py` and `test_capabilities.py` — direct instantiation, payload/bound-kwarg inspection. NO HTTP mocking.
@@ -230,6 +192,34 @@ class TestGroqClientConstruction:
         )
         llm = client.get_llm()
         assert str(llm.openai_api_base) == "https://custom.example.com/v1"
+
+
+@pytest.mark.unit
+class TestGroqModelValidation:
+    """Curated Groq models must pass validate_model() so users don't
+    see a spurious RuntimeWarning when picking a known model from the
+    catalog. validate_model() reads from MODEL_OPTIONS via
+    get_known_models() — this test catches catalog/validator drift."""
+
+    @pytest.mark.parametrize("model", [
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-specdec",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "llama-3.1-70b-versatile",
+    ])
+    def test_curated_model_validates(self, model):
+        from tradingagents.llm_clients.validators import validate_model
+        assert validate_model("groq", model) is True, (
+            f"Curated Groq model {model!r} failed validation — "
+            f"check tradingagents/llm_clients/model_catalog.py:_GROQ_MODELS"
+        )
+
+    def test_unknown_groq_model_does_not_validate(self):
+        """Sanity: a made-up Groq model returns False (not an exception)."""
+        from tradingagents.llm_clients.validators import validate_model
+        assert validate_model("groq", "made-up-model-id-xyz") is False
 ```
 
 - [ ] **Step 2: Run tests to verify they pass or fail meaningfully**
@@ -1248,6 +1238,12 @@ See [troubleshooting.md](troubleshooting.md).
 
 File: `docs/providers/capability-matrix.md`
 
+**Important:** The Groq rows below are placeholders. Before committing
+this file, update each cell using the findings from Phase 0 research
+(Task 0.1). The values shown reflect the most likely defaults based on
+Groq's published API behavior, but should not be treated as authoritative
+until verified.
+
 ```markdown
 # Provider Capability Matrix
 
@@ -1521,7 +1517,6 @@ tests/
   test_capabilities.py            (append Groq capability tests)
   conftest.py                     (add GROQ_API_KEY to dummy-key fixture)
 
-pyproject.toml                    (add pytest-asyncio + asyncio_mode)
 README.md                         (link to docs/providers/)
 ```
 
@@ -1539,8 +1534,9 @@ cli/utils.py                                   (Groq already in CLI list)
 ## Success Checklist
 
 - [ ] Phase 0 research findings documented in this plan
-- [ ] `pytest-asyncio` installed and `asyncio_mode = "auto"` configured
+- [ ] `tests/conftest.py` includes `GROQ_API_KEY` in dummy-key fixture
 - [ ] All new and existing tests pass (`pytest tests/ -v`)
+- [ ] `tests/test_groq.py::TestGroqModelValidation` confirms catalog/validator alignment
 - [ ] `tests/test_provider_registry.py` covers every legacy provider
 - [ ] Live smoke test with a real Groq key succeeds
 - [ ] Documentation under `docs/providers/` is complete and linked from README
@@ -1552,14 +1548,14 @@ cli/utils.py                                   (Groq already in CLI list)
 
 | Phase | Work | Time |
 |-------|------|------|
-| 0 | Research + dependency + conftest | 30 min |
-| 1 | Test writing (tasks 1–5) | 1.5 h |
+| 0 | Research + conftest update | 20 min |
+| 1 | Verification tests (tasks 1–5) | 1.5 h |
 | 2 | Registry + factory refactor | 1 h |
-| 3 | Capabilities adjustments (conditional) | 30 min |
+| 3 | Capabilities adjustments (conditional, often skipped) | 0–30 min |
 | 4 | Documentation | 1.5 h |
 | 5 | Smoke test + final verification | 30 min |
 
-**Total:** ~5.5 hours.
+**Total:** ~5 hours (4.5 if capabilities are unchanged).
 
 ---
 
@@ -1576,9 +1572,11 @@ cli/utils.py                                   (Groq already in CLI list)
   the same URLs. Keep them in sync; consider a follow-up to consolidate.
   Don't try to fix it in this PR — the duplication is contained and
   removing it cleanly requires a separate refactor.
-- **Async tests** rely on `pytest-asyncio` with `asyncio_mode = "auto"`.
-  If you see "async def function ... not natively supported", the dep
-  isn't installed or the mode isn't set.
+- **Async tests are synchronous in this plan.** Task 4's "async" tests
+  just verify method existence (`callable(getattr(llm, "ainvoke", ...))`),
+  so `pytest-asyncio` is NOT a required dependency. If a future
+  integration test actually awaits a Groq call, add `pytest-asyncio>=0.23`
+  and set `asyncio_mode = "auto"` in `[tool.pytest.ini_options]`.
 
 ---
 
