@@ -1,632 +1,706 @@
-# Groq Test-Driven Refactor: Implementation Plan
+# Groq Test-Driven Refactor: Implementation Plan (REVISED)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Complete Groq provider integration with full feature support (chat, tools, structured output, async) while building an extensible provider registry system for future providers.
+**Goal:** Complete Groq provider integration with verified feature support (chat, tools, structured output, async) while building an extensible provider registry system for future providers.
 
-**Architecture:** Test-driven refactor — write all tests first (mocked), then refactor provider system to a registry pattern, then verify Groq features work. Registry centralizes provider metadata; factory becomes a simple lookup.
+**Architecture:** Test-driven refactor — write tests following existing repo patterns (direct client instantiation + payload/bound-kwarg inspection), then add a provider registry as a single source of truth for metadata, then verify Groq features work. Backward compatible with existing factory API.
 
-**Tech Stack:** LangChain (ChatOpenAI), unittest.mock (testing), pytest (test runner), dataclasses (ProviderConfig)
+**Tech Stack:** LangChain (ChatOpenAI), pytest (test runner with `unit` marker), dataclasses (ProviderConfig), pytest-asyncio (new dep for async tests)
 
----
-
-## Pre-Phase-1: Research (BLOCKING)
-
-**Do this first** — answers inform test mocks and capabilities matrix.
-
-### Research Task: Verify Groq API Capabilities
-
-- [ ] **Step 1: Check Groq documentation for tool support**
-
-Visit: https://console.groq.com/docs/tool-use  
-Document answers:
-- Does Groq accept `tools` array parameter? (Expected: YES)
-- Does it support `tool_choice="auto"`? (Unknown — may only support `tools=[]`)
-- Which Llama models support tools? (e.g., 3.3+ only?)
-
-- [ ] **Step 2: Check Groq documentation for structured output**
-
-Visit: https://console.groq.com/docs/json-mode  
-Document answers:
-- Does Groq support `response_format={"type": "json_object"}`? (JSON mode)
-- Does it support `response_format={"type": "json_schema", "schema": ...}`? (Likely NO for Llama)
-- Which models support which format?
-
-- [ ] **Step 3: Check Groq documentation for streaming and async**
-
-Visit: https://console.groq.com/docs/api-reference  
-Document answers:
-- Does Groq support streaming responses? (Server-Sent Events?)
-- Does LangChain's ChatOpenAI streaming work with Groq endpoint?
-
-**Deliverable:** Findings doc (internal notes) — update design section 7.1 with answers, update task mocks below accordingly.
+**Repository conventions verified:**
+- Tests are FLAT under `tests/` (no subdirectories)
+- Tests use `@pytest.mark.unit` marker
+- Tests use direct client instantiation + inspect `_get_request_payload()` and bound kwargs
+- `conftest.py` autouses `_dummy_api_keys` fixture (sets all API keys to "placeholder")
 
 ---
 
-## Phase 1: Test Writing (No Code Changes)
+## Phase 0: Pre-Phase Research & Setup (BLOCKING)
 
-### Task 1: Write Provider Registry Tests
+### Task 0.1: Research Groq API Capabilities
+
+- [ ] **Step 1: Check Groq tool calling support**
+
+Visit: https://console.groq.com/docs/tool-use
+
+Verify and document:
+- Does Groq accept `tools` array? (Expected: YES, since 3.1+)
+- Does it support `tool_choice` parameter? (Most likely YES, but verify)
+- Are there any model-specific restrictions?
+
+- [ ] **Step 2: Check Groq structured output support**
+
+Visit: https://console.groq.com/docs/text-chat (look for response_format)
+
+Verify and document:
+- Does Groq support `response_format={"type": "json_object"}`? (Expected: YES)
+- Does it support `response_format={"type": "json_schema", ...}`? (Likely NO for Llama)
+
+- [ ] **Step 3: Confirm streaming & async**
+
+Verify Groq's OpenAI-compatible endpoint supports SSE streaming (it does — same protocol as OpenAI).
+
+- [ ] **Step 4: Document findings inline**
+
+Update this plan's "Research Findings" section below with answers. These directly inform Task 9 (capabilities).
+
+**Research Findings (fill in after research):**
+```
+Tool calling: __ (Yes/No)
+Tool choice param: __ (Yes/No — note any model exceptions)
+JSON mode: __ (Yes/No)
+JSON schema: __ (Yes/No)
+Streaming: __ (Yes/No)
+Notes: __
+```
+
+---
+
+### Task 0.2: Add pytest-asyncio Dependency
 
 **Files:**
-- Create: `tests/llm_clients/test_provider_registry.py`
-- Create: `tradingagents/llm_clients/provider_registry.py` (stub — will implement in Phase 2)
+- Modify: `pyproject.toml`
 
-- [ ] **Step 1: Create stub provider_registry.py**
+- [ ] **Step 1: Add pytest-asyncio to pyproject.toml**
+
+Open `pyproject.toml` and add `pytest-asyncio` to dependencies. Also configure `asyncio_mode`:
+
+```toml
+[project]
+dependencies = [
+    ...existing...
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"        # NEW — enables auto-detection of async tests
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: tests requiring external services",
+    "smoke: quick sanity-check tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+```
+
+- [ ] **Step 2: Install the dependency**
+
+```bash
+pip install pytest-asyncio
+# Or with uv:
+uv sync
+```
+
+- [ ] **Step 3: Verify it works**
+
+```bash
+pytest --co tests/ 2>&1 | tail -5
+```
+
+Expected: Test collection succeeds, no asyncio-related errors.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add pyproject.toml
+git commit -m "build: add pytest-asyncio for async test support"
+```
+
+---
+
+### Task 0.3: Update conftest.py with GROQ_API_KEY
+
+**Files:**
+- Modify: `tests/conftest.py`
+
+- [ ] **Step 1: Add GROQ_API_KEY to the autouse fixture**
+
+In `tests/conftest.py`, add `"GROQ_API_KEY"` to the `_API_KEY_ENV_VARS` tuple:
+
+```python
+_API_KEY_ENV_VARS = (
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "DASHSCOPE_CN_API_KEY",
+    "ZHIPU_API_KEY",
+    "ZHIPU_CN_API_KEY",
+    "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "GROQ_API_KEY",               # NEW
+    "ALPHA_VANTAGE_API_KEY",
+)
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add tests/conftest.py
+git commit -m "test: add GROQ_API_KEY to conftest dummy-key fixture"
+```
+
+---
+
+## Phase 1: Test Writing (Write Tests First — TDD)
+
+**Test directory:** `tests/` (flat — no subdirectories)  
+**Test pattern:** Follow `test_minimax.py` and `test_capabilities.py` — direct instantiation, payload/bound-kwarg inspection. NO HTTP mocking.
+
+### Task 1: Write Groq Client Construction Tests
+
+**Files:**
+- Create: `tests/test_groq.py`
+
+- [ ] **Step 1: Write tests for Groq client construction**
+
+File: `tests/test_groq.py`
+
+```python
+"""Tests for Groq provider integration.
+
+Verifies that the Groq provider correctly routes through OpenAIClient
+with the right base URL, API key env var, and that returned LLM
+instances are properly configured.
+
+Follows the repo convention of direct client instantiation and
+payload-inspection over HTTP mocking (see test_minimax.py).
+"""
+
+import pytest
+
+from tradingagents.llm_clients.factory import create_llm_client
+from tradingagents.llm_clients.openai_client import (
+    OpenAIClient,
+    NormalizedChatOpenAI,
+)
+
+
+@pytest.mark.unit
+class TestGroqClientConstruction:
+    """Verify the factory routes 'groq' through OpenAIClient with
+    Groq's base URL and the GROQ_API_KEY env var."""
+
+    def test_factory_returns_openai_client(self):
+        """Groq is OpenAI-compatible, so it uses OpenAIClient."""
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        assert isinstance(client, OpenAIClient)
+        assert client.provider == "groq"
+        assert client.model == "llama-3.3-70b-versatile"
+
+    def test_llm_has_groq_base_url(self, monkeypatch):
+        """get_llm() should configure ChatOpenAI with Groq's endpoint."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        llm = client.get_llm()
+        assert isinstance(llm, NormalizedChatOpenAI)
+        # base_url is stored on the langchain client
+        assert str(llm.openai_api_base) == "https://api.groq.com/openai/v1"
+
+    def test_llm_uses_groq_api_key_from_env(self, monkeypatch):
+        """GROQ_API_KEY env var is propagated to the langchain client."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        llm = client.get_llm()
+        # langchain stores api_key as a SecretStr — access via get_secret_value
+        assert llm.openai_api_key.get_secret_value() == "test_key_xyz"
+
+    def test_missing_api_key_raises(self, monkeypatch):
+        """If GROQ_API_KEY is unset, get_llm() raises with a helpful message."""
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        with pytest.raises(ValueError, match="GROQ_API_KEY"):
+            client.get_llm()
+
+    def test_custom_base_url_override(self, monkeypatch):
+        """Explicit base_url overrides Groq's default endpoint."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client(
+            "groq",
+            "llama-3.3-70b-versatile",
+            base_url="https://custom.example.com/v1",
+        )
+        llm = client.get_llm()
+        assert str(llm.openai_api_base) == "https://custom.example.com/v1"
+```
+
+- [ ] **Step 2: Run tests to verify they pass or fail meaningfully**
+
+```bash
+pytest tests/test_groq.py -v
+```
+
+Expected: Tests should largely **PASS** since Groq routing already exists. Any failures indicate gaps in current Groq support.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_groq.py
+git commit -m "test: add groq client construction tests"
+```
+
+---
+
+### Task 2: Write Groq Tool Calling Test
+
+**Files:**
+- Modify: `tests/test_groq.py` (append)
+
+- [ ] **Step 1: Append tool calling tests**
+
+Append to `tests/test_groq.py`:
+
+```python
+from pydantic import BaseModel
+
+
+@pytest.mark.unit
+class TestGroqToolCalling:
+    """Verify Groq Llama models can bind tools via with_structured_output().
+    
+    Follows the pattern from test_minimax.py — inspect bound kwargs to
+    confirm the schema is sent as a tool. Does NOT call the API.
+    """
+
+    class _Decision(BaseModel):
+        action: str
+        confidence: float
+
+    def _bound_kwargs(self, runnable):
+        """Extract the kwargs passed to the underlying bind() call."""
+        first = runnable.steps[0] if hasattr(runnable, "steps") else runnable
+        return getattr(first, "kwargs", {})
+
+    def test_groq_binds_schema_as_tool(self, monkeypatch):
+        """Structured output should bind the pydantic schema as a tool."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        llm = client.get_llm()
+        bound = llm.with_structured_output(self._Decision)
+        tools = self._bound_kwargs(bound).get("tools", [])
+        assert any(
+            t.get("function", {}).get("name") == "_Decision" for t in tools
+        ), f"schema not bound as tool: {tools}"
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+pytest tests/test_groq.py::TestGroqToolCalling -v
+```
+
+Expected: **PASS** if Groq follows default capabilities. Failures here would indicate Groq has unique tool-calling requirements.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_groq.py
+git commit -m "test: add groq tool-calling structured-output test"
+```
+
+---
+
+### Task 3: Write Groq Capabilities Test
+
+**Files:**
+- Modify: `tests/test_capabilities.py` (append)
+
+- [ ] **Step 1: Append Groq capability tests**
+
+Append to `tests/test_capabilities.py`:
+
+```python
+@pytest.mark.unit
+class TestGroqCapabilities:
+    """Verify capability resolution for Groq Llama models.
+    
+    Update expected values after Phase 0 research. As of writing,
+    the assumption is that Groq Llama models support default behavior
+    (tools + json_object) and can use the _DEFAULT permissive profile.
+    """
+
+    def test_groq_llama_3_3_uses_default(self):
+        """llama-3.3-70b-versatile uses default capabilities (full support)."""
+        caps = get_capabilities("llama-3.3-70b-versatile")
+        # Update these based on Phase 0 research findings
+        assert caps.supports_tool_choice is True
+        assert caps.supports_json_mode is True
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_groq_llama_3_1_uses_default(self):
+        """llama-3.1-8b-instant uses default capabilities."""
+        caps = get_capabilities("llama-3.1-8b-instant")
+        assert caps.supports_tool_choice is True
+        assert caps.preferred_structured_method == "function_calling"
+
+    def test_groq_llama_4_uses_default(self):
+        """Llama 4 models use default capabilities."""
+        caps = get_capabilities("meta-llama/llama-4-scout-17b-16e-instruct")
+        assert caps.supports_tool_choice is True
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+pytest tests/test_capabilities.py::TestGroqCapabilities -v
+```
+
+Expected: **PASS** — Groq Llama models fall through to `_DEFAULT` capabilities (permissive). If research reveals quirks (e.g., tool_choice unsupported), update Task 9 to add explicit `_BY_ID` entries.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_capabilities.py
+git commit -m "test: add groq capability resolution tests"
+```
+
+---
+
+### Task 4: Write Groq Async/Streaming Smoke Tests
+
+**Files:**
+- Modify: `tests/test_groq.py` (append)
+
+- [ ] **Step 1: Append async/streaming tests**
+
+Append to `tests/test_groq.py`:
+
+```python
+@pytest.mark.unit
+class TestGroqAsyncStreaming:
+    """Verify Groq LLM exposes async and streaming methods.
+    
+    Does NOT call the API — only verifies the langchain interface
+    is present. Real async/streaming is exercised by smoke tests.
+    """
+
+    def test_async_invoke_method_exists(self, monkeypatch):
+        """The returned LLM has the async invoke method."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        llm = client.get_llm()
+        assert callable(getattr(llm, "ainvoke", None))
+
+    def test_stream_methods_exist(self, monkeypatch):
+        """The returned LLM exposes stream() and astream()."""
+        monkeypatch.setenv("GROQ_API_KEY", "test_key_xyz")
+        client = create_llm_client("groq", "llama-3.3-70b-versatile")
+        llm = client.get_llm()
+        assert callable(getattr(llm, "stream", None))
+        assert callable(getattr(llm, "astream", None))
+```
+
+- [ ] **Step 2: Run tests**
+
+```bash
+pytest tests/test_groq.py::TestGroqAsyncStreaming -v
+```
+
+Expected: **PASS** — these methods exist on ChatOpenAI by default.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/test_groq.py
+git commit -m "test: add groq async/stream interface smoke tests"
+```
+
+---
+
+### Task 5: Write Provider Registry Tests
+
+**Files:**
+- Create: `tests/test_provider_registry.py`
+- Create: `tradingagents/llm_clients/provider_registry.py` (stub)
+
+- [ ] **Step 1: Create a minimal stub for provider_registry.py**
 
 File: `tradingagents/llm_clients/provider_registry.py`
 
 ```python
-"""Provider registry: centralized configuration for all LLM providers."""
+"""Provider registry: single source of truth for provider metadata.
+
+Stub created by Phase 1. Full implementation arrives in Phase 2 (Task 7).
+"""
 
 from dataclasses import dataclass
-from typing import Type, Optional, Dict, List
+from typing import Dict, Optional, Type
 
-# Stub — will populate in Phase 2
-@dataclass
+
+@dataclass(frozen=True)
 class ProviderConfig:
     """Metadata for a single provider."""
     name: str
-    client_class: Type['BaseLLMClient']
+    client_class: type
     base_url: Optional[str]
     api_key_env: Optional[str]
-    models: Dict[str, List[tuple]]
+
 
 PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {}
 ```
 
-- [ ] **Step 2: Write test for registry lookup**
+- [ ] **Step 2: Write tests for the registry**
 
-File: `tests/llm_clients/test_provider_registry.py`
+File: `tests/test_provider_registry.py`
 
 ```python
+"""Tests for the provider registry.
+
+Verifies all existing providers are registered and that registry
+metadata matches the factory's behavior. The registry must cover
+EVERY provider currently supported by create_llm_client() to
+preserve backward compatibility.
+"""
+
 import pytest
-from tradingagents.llm_clients.provider_registry import PROVIDER_REGISTRY, ProviderConfig
+
+from tradingagents.llm_clients.provider_registry import (
+    PROVIDER_REGISTRY,
+    ProviderConfig,
+)
 
 
-def test_groq_registered_in_registry():
-    """Test that Groq is registered in the provider registry."""
-    assert "groq" in PROVIDER_REGISTRY
-    config = PROVIDER_REGISTRY["groq"]
-    assert isinstance(config, ProviderConfig)
-    assert config.name == "groq"
-    assert config.api_key_env == "GROQ_API_KEY"
-    assert config.base_url == "https://api.groq.com/openai/v1"
+# Single source of truth for which providers must be registered.
+# Mirrors the union of _OPENAI_COMPATIBLE and the explicit branches
+# in the current factory.py.
+_EXPECTED_PROVIDERS = (
+    "openai",
+    "anthropic",
+    "google",
+    "azure",
+    "xai",
+    "deepseek",
+    "qwen",
+    "qwen-cn",
+    "glm",
+    "glm-cn",
+    "minimax",
+    "minimax-cn",
+    "openrouter",
+    "groq",
+    "ollama",
+)
 
 
-def test_all_registry_entries_have_required_fields():
-    """Test that every provider has all required metadata."""
-    for provider_name, config in PROVIDER_REGISTRY.items():
-        assert config.name is not None
-        assert config.client_class is not None
-        assert config.api_key_env is not None or provider_name == "ollama"  # Ollama is special
-        assert config.models is not None
+@pytest.mark.unit
+class TestRegistryCoverage:
+    """Every provider supported by the legacy factory must be in the registry."""
+
+    @pytest.mark.parametrize("provider", _EXPECTED_PROVIDERS)
+    def test_provider_is_registered(self, provider):
+        assert provider in PROVIDER_REGISTRY, (
+            f"Provider '{provider}' missing from registry — "
+            f"this is a backward-compatibility regression."
+        )
+
+    def test_registry_entries_are_provider_config(self):
+        for name, config in PROVIDER_REGISTRY.items():
+            assert isinstance(config, ProviderConfig), (
+                f"Registry entry '{name}' is not a ProviderConfig instance"
+            )
+
+
+@pytest.mark.unit
+class TestGroqRegistryEntry:
+    """Groq-specific registry metadata."""
+
+    def test_groq_uses_openai_client(self):
+        from tradingagents.llm_clients.openai_client import OpenAIClient
+        config = PROVIDER_REGISTRY["groq"]
+        assert config.client_class is OpenAIClient
+
+    def test_groq_base_url(self):
+        config = PROVIDER_REGISTRY["groq"]
+        assert config.base_url == "https://api.groq.com/openai/v1"
+
+    def test_groq_api_key_env(self):
+        config = PROVIDER_REGISTRY["groq"]
+        assert config.api_key_env == "GROQ_API_KEY"
+
+
+@pytest.mark.unit
+class TestSpecialProviders:
+    """Edge cases — ollama has no API key, azure has no fixed base_url."""
+
+    def test_ollama_has_no_api_key(self):
+        config = PROVIDER_REGISTRY["ollama"]
+        assert config.api_key_env is None
+
+    def test_azure_base_url_is_none(self):
+        """Azure resolves base_url from AZURE_OPENAI_ENDPOINT env var."""
+        config = PROVIDER_REGISTRY["azure"]
+        assert config.base_url is None
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
 
 ```bash
-cd /path/to/repo
-pytest tests/llm_clients/test_provider_registry.py -v
+pytest tests/test_provider_registry.py -v
 ```
 
-Expected: **FAIL** — registry is empty, assertions fail.
+Expected: **FAIL** — registry is empty, parametrized tests fail for each missing provider.
 
-- [ ] **Step 4: Commit test file**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add tests/llm_clients/test_provider_registry.py tradingagents/llm_clients/provider_registry.py
-git commit -m "test: add provider registry tests (failing)"
-```
-
----
-
-### Task 2: Write Groq Chat Completions Test
-
-**Files:**
-- Create: `tests/llm_clients/test_groq_chat.py`
-
-- [ ] **Step 1: Write test for Groq chat completions**
-
-File: `tests/llm_clients/test_groq_chat.py`
-
-```python
-import pytest
-from unittest.mock import patch, MagicMock
-from tradingagents.llm_clients.factory import create_llm_client
-
-
-@patch("langchain_openai.ChatOpenAI._make_request")
-def test_groq_chat_completion_basic(mock_request):
-    """Test that Groq client sends and receives chat completions correctly."""
-    # Mock response from Groq API
-    mock_request.return_value = {
-        "choices": [
-            {"message": {"content": "Hello, I am Llama."}}
-        ]
-    }
-    
-    # Create Groq client
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Make request
-    response = llm.invoke([("human", "Say hello")])
-    
-    # Verify response
-    assert response.content == "Hello, I am Llama."
-    
-    # Verify base URL was set correctly
-    assert llm.base_url == "https://api.groq.com/openai/v1"
-
-
-@patch.dict("os.environ", {"GROQ_API_KEY": "test_key_123"})
-@patch("langchain_openai.ChatOpenAI._make_request")
-def test_groq_api_key_loaded_from_env(mock_request, mock_env):
-    """Test that GROQ_API_KEY environment variable is used."""
-    mock_request.return_value = {"choices": [{"message": {"content": "OK"}}]}
-    
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Verify API key was passed
-    assert llm.api_key == "test_key_123"
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-pytest tests/llm_clients/test_groq_chat.py -v
-```
-
-Expected: **FAIL** — `create_llm_client` may not recognize "groq" yet or registry is empty.
-
-- [ ] **Step 3: Commit test**
-
-```bash
-git add tests/llm_clients/test_groq_chat.py
-git commit -m "test: add groq chat completions test (failing)"
-```
-
----
-
-### Task 3: Write Groq Tool Calling Test
-
-**Files:**
-- Create: `tests/llm_clients/test_groq_tools.py`
-
-- [ ] **Step 1: Write test for Groq with function tools**
-
-File: `tests/llm_clients/test_groq_tools.py`
-
-```python
-import pytest
-from unittest.mock import patch
-from tradingagents.llm_clients.factory import create_llm_client
-
-
-@patch("langchain_openai.ChatOpenAI._make_request")
-def test_groq_tool_calling_basic(mock_request):
-    """Test that Groq accepts tools parameter and processes tool calls."""
-    # Mock response from Groq with tool call
-    mock_request.return_value = {
-        "choices": [
-            {
-                "message": {
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call_xyz",
-                            "function": {"name": "get_weather", "arguments": '{"location": "NYC"}'},
-                            "type": "function"
-                        }
-                    ]
-                }
-            }
-        ]
-    }
-    
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Define a tool
-    tools_schema = [
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather for a location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "location": {"type": "string"}
-                    }
-                }
-            }
-        }
-    ]
-    
-    # Make request with tools
-    response = llm.invoke([("human", "What's the weather in NYC?")], tools=tools_schema)
-    
-    # Verify tools were sent in request
-    call_args = mock_request.call_args
-    assert "tools" in call_args[1]
-    assert len(call_args[1]["tools"]) == 1
-
-
-def test_groq_tool_choice_support():
-    """Test that Groq client handles tool_choice parameter correctly.
-    
-    Note: Based on research, if Groq doesn't support tool_choice,
-    update capabilities.py to set supports_tool_choice=False.
-    """
-    from tradingagents.llm_clients.capabilities import get_capabilities
-    
-    caps = get_capabilities("llama-3.3-70b-versatile")
-    
-    # This test will inform whether to set tool_choice support
-    # If research shows Groq doesn't support tool_choice, caps should reflect False
-    # Update based on research findings from Pre-Phase-1
-    assert hasattr(caps, "supports_tool_choice")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-pytest tests/llm_clients/test_groq_tools.py -v
-```
-
-Expected: **FAIL** — tools not yet in capabilities matrix.
-
-- [ ] **Step 3: Commit test**
-
-```bash
-git add tests/llm_clients/test_groq_tools.py
-git commit -m "test: add groq tool calling test (failing)"
-```
-
----
-
-### Task 4: Write Groq Structured Output Test
-
-**Files:**
-- Create: `tests/llm_clients/test_groq_structured_output.py`
-
-- [ ] **Step 1: Write test for JSON mode**
-
-File: `tests/llm_clients/test_groq_structured_output.py`
-
-```python
-import pytest
-from unittest.mock import patch
-from tradingagents.llm_clients.factory import create_llm_client
-
-
-@patch("langchain_openai.ChatOpenAI._make_request")
-def test_groq_json_mode_support(mock_request):
-    """Test that Groq accepts response_format for JSON mode."""
-    # Mock response from Groq in JSON mode
-    mock_request.return_value = {
-        "choices": [
-            {
-                "message": {"content": '{"name": "John", "age": 30}'}
-            }
-        ]
-    }
-    
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Request with JSON mode
-    response = llm.invoke(
-        [("human", "Return user data as JSON")],
-        response_format={"type": "json_object"}
-    )
-    
-    # Verify response_format was sent
-    call_args = mock_request.call_args
-    assert "response_format" in call_args[1]
-    assert call_args[1]["response_format"]["type"] == "json_object"
-
-
-def test_groq_json_schema_support():
-    """Test Groq's support for JSON schema (if available).
-    
-    Note: Research may show Llama doesn't support json_schema.
-    If so, update capabilities.py: supports_json_schema=False.
-    """
-    from tradingagents.llm_clients.capabilities import get_capabilities
-    
-    caps = get_capabilities("llama-3.3-70b-versatile")
-    
-    # This will be set based on research findings
-    # If Groq doesn't support json_schema, this should be False
-    assert hasattr(caps, "supports_json_schema")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-pytest tests/llm_clients/test_groq_structured_output.py -v
-```
-
-Expected: **FAIL** — structured output not yet in capabilities matrix.
-
-- [ ] **Step 3: Commit test**
-
-```bash
-git add tests/llm_clients/test_groq_structured_output.py
-git commit -m "test: add groq structured output test (failing)"
-```
-
----
-
-### Task 5: Write Groq Async/Streaming Test
-
-**Files:**
-- Create: `tests/llm_clients/test_groq_async.py`
-
-- [ ] **Step 1: Write test for async invoke**
-
-File: `tests/llm_clients/test_groq_async.py`
-
-```python
-import pytest
-import asyncio
-from unittest.mock import patch, AsyncMock
-from tradingagents.llm_clients.factory import create_llm_client
-
-
-@pytest.mark.asyncio
-@patch("langchain_openai.ChatOpenAI._amake_request", new_callable=AsyncMock)
-async def test_groq_async_invoke(mock_request):
-    """Test that Groq client supports async invoke."""
-    mock_request.return_value = {
-        "choices": [
-            {"message": {"content": "Async response"}}
-        ]
-    }
-    
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Async invoke
-    response = await llm.ainvoke([("human", "Test")])
-    
-    assert response.content == "Async response"
-
-
-def test_groq_streaming_support():
-    """Test that Groq client supports streaming."""
-    from tradingagents.llm_clients.factory import create_llm_client
-    
-    client = create_llm_client("groq", "llama-3.3-70b-versatile")
-    llm = client.get_llm()
-    
-    # Verify streaming methods exist (may be no-op in mocks)
-    assert hasattr(llm, "stream")
-    assert hasattr(llm, "astream")
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-```bash
-pytest tests/llm_clients/test_groq_async.py -v
-```
-
-Expected: **FAIL** — async methods not yet tested.
-
-- [ ] **Step 3: Commit test**
-
-```bash
-git add tests/llm_clients/test_groq_async.py
-git commit -m "test: add groq async/streaming test (failing)"
-```
-
----
-
-### Task 6: Write Capability Matrix Test
-
-**Files:**
-- Create: `tests/llm_clients/test_capabilities_matrix.py`
-
-- [ ] **Step 1: Write test for Groq capabilities**
-
-File: `tests/llm_clients/test_capabilities_matrix.py`
-
-```python
-import pytest
-from tradingagents.llm_clients.capabilities import get_capabilities
-
-
-def test_groq_llama_3_3_capabilities():
-    """Test that llama-3.3-70b-versatile has correct capabilities."""
-    caps = get_capabilities("llama-3.3-70b-versatile")
-    
-    # Based on research (Pre-Phase-1), set expected values
-    # These are placeholders — update based on actual Groq API research
-    assert caps.supports_tool_choice in (True, False)  # Check research findings
-    assert caps.supports_json_mode in (True, False)    # Check research findings
-    assert caps.supports_json_schema in (True, False)  # Likely False
-    assert caps.preferred_structured_method in ("function_calling", "json_mode", "none")
-
-
-def test_groq_llama_3_1_capabilities():
-    """Test that llama-3.1-8b-instant has correct capabilities."""
-    caps = get_capabilities("llama-3.1-8b-instant")
-    
-    # May differ from 3.3 — based on research
-    assert caps.supports_tool_choice in (True, False)
-    assert caps.supports_json_mode in (True, False)
-
-
-def test_default_capability_fallback():
-    """Test that unknown models fall back to DEFAULT capabilities."""
-    from tradingagents.llm_clients.capabilities import _DEFAULT
-    
-    caps = get_capabilities("llama-custom-unknown-model")
-    
-    # Should return default (not raise error)
-    assert caps == _DEFAULT
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-```bash
-pytest tests/llm_clients/test_capabilities_matrix.py -v
-```
-
-Expected: **FAIL** — Groq not in capabilities matrix yet.
-
-- [ ] **Step 3: Commit test**
-
-```bash
-git add tests/llm_clients/test_capabilities_matrix.py
-git commit -m "test: add capabilities matrix test (failing)"
+git add tests/test_provider_registry.py tradingagents/llm_clients/provider_registry.py
+git commit -m "test: add provider registry coverage tests (failing)"
 ```
 
 ---
 
 ## Phase 2: Provider Registry Implementation
 
-### Task 7: Implement Provider Registry
+### Task 6: Implement Provider Registry
 
 **Files:**
 - Modify: `tradingagents/llm_clients/provider_registry.py`
-- Modify: `tradingagents/llm_clients/api_key_env.py` (verify GROQ_API_KEY exists)
-- Reference: `tradingagents/llm_clients/model_catalog.py` (Groq models already here)
 
-- [ ] **Step 1: Verify GROQ_API_KEY in api_key_env.py**
+- [ ] **Step 1: Implement full ProviderConfig and registry**
 
-File: `tradingagents/llm_clients/api_key_env.py`
-
-Check if "groq" is already mapped to "GROQ_API_KEY". If not:
+Replace the stub in `tradingagents/llm_clients/provider_registry.py`:
 
 ```python
-# In api_key_env.py, add to mapping:
-PROVIDER_API_KEY_ENV = {
-    ...existing...
-    "groq": "GROQ_API_KEY",
-}
-```
+"""Provider registry: single source of truth for provider metadata.
 
-- [ ] **Step 2: Implement ProviderConfig in provider_registry.py**
+The registry holds metadata (which client class to instantiate, default
+base URL for display/docs, API key env var). Actual client construction
+is done by the factory, which can apply per-client-class quirks (e.g.,
+OpenAIClient receives the `provider` kwarg; other clients do not).
 
-File: `tradingagents/llm_clients/provider_registry.py`
+base_url here is informational/documentation — the live source of truth
+for OpenAI-compatible providers' endpoints remains
+`openai_client._PROVIDER_BASE_URL`, which OpenAIClient consults at
+runtime. The registry stays in sync with that mapping by convention.
 
-```python
-"""Provider registry: centralized configuration for all LLM providers."""
+When adding a new provider:
+  1. Add an entry here.
+  2. If OpenAI-compatible: ensure openai_client._PROVIDER_BASE_URL and
+     api_key_env.PROVIDER_API_KEY_ENV are also updated.
+  3. If a new client class: import and reference it here.
+"""
+
+from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Type, Optional, Dict, List, Tuple
-
-# Type alias for model options
-ModelOption = Tuple[str, str]  # (display_label, model_id)
+from typing import Dict, Optional, Type
 
 
 @dataclass(frozen=True)
 class ProviderConfig:
-    """Metadata for a single provider.
-    
-    The client_class field determines everything about how the provider
-    is instantiated and what APIs it supports. No separate "is_openai_compatible"
-    flag needed — the client_class itself tells you the implementation.
+    """Metadata for a single LLM provider.
+
+    Attributes:
+        name: Canonical lowercase provider key.
+        client_class: BaseLLMClient subclass to instantiate.
+        base_url: Default API endpoint, or None if dynamically resolved.
+        api_key_env: Environment variable holding the API key, or None
+            for providers like ollama that do not authenticate.
     """
-    name: str                               # "groq", "openai", etc.
-    client_class: Type                      # e.g., OpenAIClient, AnthropicClient
-    base_url: Optional[str]                 # Default API endpoint
-    api_key_env: Optional[str]              # ENV var name for API key
-    models: Dict[str, List[ModelOption]]    # {"quick": [...], "deep": [...]}
+    name: str
+    client_class: type
+    base_url: Optional[str]
+    api_key_env: Optional[str]
 
 
-# Build registry from existing providers
 def _build_registry() -> Dict[str, ProviderConfig]:
-    """Build the provider registry from imports."""
+    """Construct the registry with lazy imports to avoid heavy SDK imports
+    at module-load time (mirrors the lazy-import pattern in factory.py)."""
     from tradingagents.llm_clients.openai_client import OpenAIClient
     from tradingagents.llm_clients.anthropic_client import AnthropicClient
     from tradingagents.llm_clients.google_client import GoogleClient
     from tradingagents.llm_clients.azure_client import AzureOpenAIClient
-    from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
-    
-    return {
-        "groq": ProviderConfig(
-            name="groq",
-            client_class=OpenAIClient,
-            base_url="https://api.groq.com/openai/v1",
-            api_key_env="GROQ_API_KEY",
-            models=MODEL_OPTIONS.get("groq", {}),
-        ),
-        "openai": ProviderConfig(
-            name="openai",
-            client_class=OpenAIClient,
-            base_url="https://api.openai.com/v1",
-            api_key_env="OPENAI_API_KEY",
-            models=MODEL_OPTIONS.get("openai", {}),
-        ),
-        "anthropic": ProviderConfig(
-            name="anthropic",
-            client_class=AnthropicClient,
-            base_url=None,  # Anthropic uses default endpoint
-            api_key_env="ANTHROPIC_API_KEY",
-            models=MODEL_OPTIONS.get("anthropic", {}),
-        ),
-        "google": ProviderConfig(
-            name="google",
-            client_class=GoogleClient,
-            base_url=None,
-            api_key_env="GOOGLE_API_KEY",
-            models=MODEL_OPTIONS.get("google", {}),
-        ),
-        "azure": ProviderConfig(
-            name="azure",
-            client_class=AzureOpenAIClient,
-            base_url=None,
-            api_key_env="AZURE_OPENAI_API_KEY",
-            models=MODEL_OPTIONS.get("azure", {}),
-        ),
-        # Add other existing providers as needed...
+
+    # All OpenAI-compatible providers use OpenAIClient. Base URLs mirror
+    # openai_client._PROVIDER_BASE_URL — keep these in sync.
+    openai_compatible: Dict[str, tuple] = {
+        "openai":     ("https://api.openai.com/v1",                                "OPENAI_API_KEY"),
+        "xai":        ("https://api.x.ai/v1",                                      "XAI_API_KEY"),
+        "deepseek":   ("https://api.deepseek.com",                                 "DEEPSEEK_API_KEY"),
+        "qwen":       ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1",   "DASHSCOPE_API_KEY"),
+        "qwen-cn":    ("https://dashscope.aliyuncs.com/compatible-mode/v1",        "DASHSCOPE_CN_API_KEY"),
+        "glm":        ("https://api.z.ai/api/paas/v4/",                            "ZHIPU_API_KEY"),
+        "glm-cn":     ("https://open.bigmodel.cn/api/paas/v4/",                    "ZHIPU_CN_API_KEY"),
+        "minimax":    ("https://api.minimax.io/v1",                                "MINIMAX_API_KEY"),
+        "minimax-cn": ("https://api.minimaxi.com/v1",                              "MINIMAX_CN_API_KEY"),
+        "openrouter": ("https://openrouter.ai/api/v1",                             "OPENROUTER_API_KEY"),
+        "groq":       ("https://api.groq.com/openai/v1",                           "GROQ_API_KEY"),
+        "ollama":     ("http://localhost:11434/v1",                                None),
     }
+
+    registry: Dict[str, ProviderConfig] = {
+        name: ProviderConfig(name=name, client_class=OpenAIClient,
+                             base_url=base_url, api_key_env=api_key_env)
+        for name, (base_url, api_key_env) in openai_compatible.items()
+    }
+
+    # Native (non-OpenAI-compatible) clients
+    registry["anthropic"] = ProviderConfig(
+        name="anthropic", client_class=AnthropicClient,
+        base_url=None, api_key_env="ANTHROPIC_API_KEY",
+    )
+    registry["google"] = ProviderConfig(
+        name="google", client_class=GoogleClient,
+        base_url=None, api_key_env="GOOGLE_API_KEY",
+    )
+    registry["azure"] = ProviderConfig(
+        name="azure", client_class=AzureOpenAIClient,
+        base_url=None, api_key_env="AZURE_OPENAI_API_KEY",
+    )
+    return registry
 
 
 PROVIDER_REGISTRY: Dict[str, ProviderConfig] = _build_registry()
 ```
 
-- [ ] **Step 3: Run registry tests**
+- [ ] **Step 2: Run registry tests**
 
 ```bash
-pytest tests/llm_clients/test_provider_registry.py -v
+pytest tests/test_provider_registry.py -v
 ```
 
-Expected: **PASS** — Groq is registered, registry lookup works.
+Expected: **ALL PASS** — every expected provider is registered with correct metadata.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
-git add tradingagents/llm_clients/provider_registry.py tradingagents/llm_clients/api_key_env.py
-git commit -m "feat: implement provider registry with Groq registration"
+git add tradingagents/llm_clients/provider_registry.py
+git commit -m "feat(llm_clients): introduce provider registry with full provider coverage"
 ```
 
 ---
 
-### Task 8: Refactor Factory to Use Registry
+### Task 7: Refactor Factory to Use Registry
 
 **Files:**
 - Modify: `tradingagents/llm_clients/factory.py`
 
-- [ ] **Step 1: Check current factory.py structure**
-
-Read the current factory.py to understand provider conditionals and how they work.
-
-- [ ] **Step 2: Refactor factory.py to use registry**
+- [ ] **Step 1: Replace factory.py implementation**
 
 File: `tradingagents/llm_clients/factory.py`
 
-Replace the current provider conditionals with:
-
 ```python
+"""Factory for LLM clients.
+
+Resolves the provider via the registry and instantiates the right
+client class. OpenAIClient takes a `provider` kwarg because one
+class serves many OpenAI-compatible providers (it consults that
+kwarg to pick base URL / API key env). Other client classes are
+provider-specific and don't need it; we don't pass it to them.
+"""
+
 from typing import Optional
-from tradingagents.llm_clients.provider_registry import PROVIDER_REGISTRY
-from tradingagents.llm_clients.base_client import BaseLLMClient
+
+from .base_client import BaseLLMClient
+from .provider_registry import PROVIDER_REGISTRY
 
 
 def create_llm_client(
@@ -635,160 +709,136 @@ def create_llm_client(
     base_url: Optional[str] = None,
     **kwargs,
 ) -> BaseLLMClient:
-    """Create an LLM client for the specified provider.
-    
-    Provider modules are imported lazily to avoid pulling in heavy
-    dependencies unless needed.
-    
+    """Create an LLM client for the given provider.
+
     Args:
-        provider: LLM provider name (e.g., "groq", "openai")
-        model: Model identifier
-        base_url: Optional override for default endpoint
-        **kwargs: Provider-specific arguments
-    
+        provider: Provider name (case-insensitive).
+        model: Model identifier.
+        base_url: Optional override for the provider's default endpoint.
+        **kwargs: Forwarded to the underlying client class.
+
     Returns:
-        Configured BaseLLMClient instance
-    
+        Configured BaseLLMClient instance.
+
     Raises:
-        ValueError: If provider is not supported
+        ValueError: If the provider is not registered.
     """
     provider_lower = provider.lower()
-    
+
     if provider_lower not in PROVIDER_REGISTRY:
         raise ValueError(f"Unsupported LLM provider: {provider}")
-    
+
     config = PROVIDER_REGISTRY[provider_lower]
-    client_class = config.client_class
-    
-    # Use provided base_url or fall back to registry default
     effective_base_url = base_url or config.base_url
-    
-    # Instantiate client with provider name for backward compatibility
-    return client_class(
+
+    # OpenAIClient handles many OpenAI-compatible providers, so it needs
+    # the provider name to resolve its own internal base-URL/api-key
+    # mappings. Other client classes are provider-specific and accept
+    # only (model, base_url, **kwargs).
+    from .openai_client import OpenAIClient
+    if config.client_class is OpenAIClient:
+        return config.client_class(
+            model=model,
+            base_url=effective_base_url,
+            provider=provider_lower,
+            **kwargs,
+        )
+    return config.client_class(
         model=model,
         base_url=effective_base_url,
-        provider=provider_lower,
-        **kwargs
+        **kwargs,
     )
 ```
 
-- [ ] **Step 3: Verify backward compatibility**
-
-Run existing tests to ensure old callers still work:
+- [ ] **Step 2: Run all LLM-related tests**
 
 ```bash
-pytest tests/ -k "llm" -v
+pytest tests/test_groq.py tests/test_provider_registry.py tests/test_capabilities.py tests/test_minimax.py tests/test_deepseek_reasoning.py tests/test_ollama_base_url.py tests/test_api_key_env.py tests/test_model_validation.py -v
 ```
 
-Expected: All existing tests still pass (backward compatible).
+Expected: **ALL PASS** — Groq, registry, and existing provider tests all green.
 
-- [ ] **Step 4: Commit**
-
-```bash
-git add tradingagents/llm_clients/factory.py
-git commit -m "refactor: factory uses provider registry instead of conditionals"
-```
-
----
-
-## Phase 3: Groq Feature Verification & Implementation
-
-### Task 9: Update Capabilities Matrix with Groq
-
-**Files:**
-- Modify: `tradingagents/llm_clients/capabilities.py`
-
-- [ ] **Step 1: Check research findings**
-
-Use the research findings from Pre-Phase-1 to determine Groq capabilities:
-- Tool choice support? (tool_choice parameter)
-- JSON mode support? (response_format JSON object)
-- JSON schema support? (response_format JSON schema)
-
-- [ ] **Step 2: Add Groq entries to capabilities.py**
-
-File: `tradingagents/llm_clients/capabilities.py`
-
-Add after the existing model mappings:
-
-```python
-# Groq Llama models — based on research findings (Pre-Phase-1)
-# If research shows tool_choice is NOT supported, set supports_tool_choice=False
-_GROQ_LLAMA = ModelCapabilities(
-    supports_tool_choice=True,  # UPDATE based on research
-    supports_json_mode=True,    # UPDATE based on research
-    supports_json_schema=False, # Llama likely doesn't support this
-    preferred_structured_method="function_calling",  # or "json_mode" if tools aren't supported
-)
-
-# Add to _BY_ID mapping if needed (if different models have different capabilities)
-_BY_ID: dict[str, ModelCapabilities] = {
-    ...existing...
-    "llama-3.3-70b-versatile": _GROQ_LLAMA,
-    "llama-3.1-70b-versatile": _GROQ_LLAMA,
-    "llama-3.1-8b-instant": _GROQ_LLAMA,
-    "meta-llama/llama-4-scout-17b-16e-instruct": _GROQ_LLAMA,
-    "meta-llama/llama-4-maverick-17b-128e-instruct": _GROQ_LLAMA,
-}
-```
-
-- [ ] **Step 3: Run capability tests**
-
-```bash
-pytest tests/llm_clients/test_capabilities_matrix.py -v
-```
-
-Expected: **PASS** — Groq capabilities are now in the matrix.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tradingagents/llm_clients/capabilities.py
-git commit -m "feat: add Groq capability matrix entries based on research findings"
-```
-
----
-
-### Task 10: Run and Verify All LLM Client Tests
-
-**Files:**
-- Test: all tests in `tests/llm_clients/`
-
-- [ ] **Step 1: Run all Groq tests**
-
-```bash
-pytest tests/llm_clients/test_groq_*.py tests/llm_clients/test_provider_registry.py tests/llm_clients/test_capabilities_matrix.py -v
-```
-
-Expected: **ALL PASS** — Registry, chat, tools, structured output, async, and capabilities all working.
-
-- [ ] **Step 2: Run all existing LLM tests**
-
-```bash
-pytest tests/llm_clients/ -v
-```
-
-Expected: **ALL PASS** — Backward compatibility maintained.
-
-- [ ] **Step 3: Verify no regressions in other tests**
+- [ ] **Step 3: Run the full test suite to confirm no regressions**
 
 ```bash
 pytest tests/ -v --tb=short
 ```
 
-Expected: All tests pass or show expected failures (unrelated to this work).
+Expected: All previously-passing tests still pass.
 
-- [ ] **Step 4: Commit verification**
+- [ ] **Step 4: Commit**
 
 ```bash
-git commit --allow-empty -m "test: all groq and provider tests pass, backward compatibility verified"
+git add tradingagents/llm_clients/factory.py
+git commit -m "refactor(factory): dispatch through provider registry (backward compatible)"
+```
+
+---
+
+## Phase 3: Groq Capability Adjustments (if needed)
+
+### Task 8: Update Capabilities Matrix (Conditional on Research)
+
+**Files:**
+- Conditionally modify: `tradingagents/llm_clients/capabilities.py`
+
+- [ ] **Step 1: Decide if any changes are needed**
+
+Review Phase 0 research findings:
+
+- **If Groq Llama models behave like the `_DEFAULT` profile** (support tools, tool_choice, json_object): NO CHANGES NEEDED. Skip to Step 4 and commit an empty change-note.
+
+- **If Groq Llama has quirks** (e.g., rejects `tool_choice`, no json_object, etc.): Continue to Step 2.
+
+- [ ] **Step 2: Add Groq-specific ModelCapabilities entries (if needed)**
+
+In `tradingagents/llm_clients/capabilities.py`, add a profile and `_BY_ID` entries. Example (only if research shows quirks):
+
+```python
+# Add near other profiles:
+_GROQ_LLAMA = ModelCapabilities(
+    supports_tool_choice=True,    # set to False if research shows otherwise
+    supports_json_mode=True,      # set to False if Llama models lack json_object
+    supports_json_schema=False,   # Llama models on Groq don't support json_schema
+    preferred_structured_method="function_calling",
+)
+
+# In _BY_ID, after existing entries:
+_BY_ID.update({
+    "llama-3.3-70b-versatile": _GROQ_LLAMA,
+    "llama-3.1-70b-versatile": _GROQ_LLAMA,
+    "llama-3.1-8b-instant":    _GROQ_LLAMA,
+    "llama-3.3-70b-specdec":   _GROQ_LLAMA,
+    "meta-llama/llama-4-scout-17b-16e-instruct":    _GROQ_LLAMA,
+    "meta-llama/llama-4-maverick-17b-128e-instruct": _GROQ_LLAMA,
+})
+```
+
+- [ ] **Step 3: Update tests to match (if you changed defaults)**
+
+Edit the `TestGroqCapabilities` class in `tests/test_capabilities.py` to assert the new expected values (e.g., if you set `supports_json_schema=False`, add `assert caps.supports_json_schema is False`).
+
+- [ ] **Step 4: Run capability and Groq tests**
+
+```bash
+pytest tests/test_capabilities.py tests/test_groq.py -v
+```
+
+Expected: **ALL PASS**.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tradingagents/llm_clients/capabilities.py tests/test_capabilities.py
+# If no changes were needed, skip the commit entirely.
+git commit -m "feat(capabilities): record Groq Llama model quirks (if any)"
 ```
 
 ---
 
 ## Phase 4: Documentation
 
-### Task 11: Write Provider Documentation
+### Task 9: Create Provider Documentation Directory
 
 **Files:**
 - Create: `docs/providers/README.md`
@@ -805,35 +855,40 @@ File: `docs/providers/README.md`
 ```markdown
 # LLM Provider Documentation
 
-This directory contains guides for working with LLM providers in the trading agents system.
+Guides for working with LLM providers in TradingAgents.
 
 ## Quick Links
 
-- **[Architecture](architecture.md)** — How the provider system works
-- **[Adding a Provider](adding-a-provider.md)** — Step-by-step guide for new providers
-- **[Groq Setup](groq-setup-and-usage.md)** — Groq-specific configuration and models
-- **[Capability Matrix](capability-matrix.md)** — Which providers support which features
-- **[Troubleshooting](troubleshooting.md)** — Common issues and solutions
+- [Architecture](architecture.md) — How the provider system works
+- [Adding a Provider](adding-a-provider.md) — Step-by-step guide
+- [Groq Setup](groq-setup-and-usage.md) — Groq configuration and models
+- [Capability Matrix](capability-matrix.md) — Feature support per provider
+- [Troubleshooting](troubleshooting.md) — Common issues
 
 ## Supported Providers
 
-- **OpenAI** — GPT-4, GPT-5 models
-- **Anthropic** — Claude Opus, Sonnet, Haiku
-- **Google** — Gemini models
-- **Groq** — Llama 3.1, 3.3, Llama 4 (free tier available)
-- **Ollama** — Local models
-- **Others** — DeepSeek, Qwen, GLM, MiniMax, xAI, Azure OpenAI, OpenRouter
+| Provider | Native or OpenAI-compatible | Notes |
+|----------|----------------------------|-------|
+| OpenAI | Native (Responses API) | GPT-4, GPT-5 families |
+| Anthropic | Native | Claude Opus/Sonnet/Haiku |
+| Google | Native | Gemini 2.5 / 3 |
+| Azure OpenAI | Native | Azure-deployed OpenAI models |
+| Groq | OpenAI-compatible | Llama 3.1 / 3.3 / 4 — free tier |
+| xAI | OpenAI-compatible | Grok models |
+| DeepSeek | OpenAI-compatible | V3 / V4 families |
+| Qwen / Qwen-CN | OpenAI-compatible | Alibaba DashScope |
+| GLM / GLM-CN | OpenAI-compatible | Zhipu BigModel |
+| MiniMax / MiniMax-CN | OpenAI-compatible | M2.x family |
+| OpenRouter | OpenAI-compatible | Multi-model router |
+| Ollama | OpenAI-compatible | Local runtime |
 
 ## Quick Start
 
 ```python
 from tradingagents.llm_clients.factory import create_llm_client
 
-# Create a Groq client
 client = create_llm_client("groq", "llama-3.3-70b-versatile")
 llm = client.get_llm()
-
-# Use it
 response = llm.invoke([("human", "What is 2+2?")])
 print(response.content)
 ```
@@ -850,96 +905,90 @@ File: `docs/providers/architecture.md`
 
 ## Overview
 
-The provider system uses a **registry pattern** to centralize configuration and make adding new providers trivial.
+The provider system uses a **registry pattern** to centralize metadata
+and a thin **factory** to dispatch construction across client classes.
 
 ## Components
 
-### 1. ProviderConfig (provider_registry.py)
+### 1. `provider_registry.py`
+
+Single source of truth for which providers exist and how they map to
+client classes:
 
 ```python
-@dataclass
+@dataclass(frozen=True)
 class ProviderConfig:
-    name: str                               # Provider name ("groq", "openai", etc.)
-    client_class: Type[BaseLLMClient]      # Which client class to instantiate
-    base_url: Optional[str]                 # Default API endpoint
-    api_key_env: Optional[str]              # ENV var for API key
-    models: Dict[str, List[ModelOption]]    # Available models
+    name: str
+    client_class: type
+    base_url: Optional[str]
+    api_key_env: Optional[str]
+
+PROVIDER_REGISTRY: Dict[str, ProviderConfig] = { ... }
 ```
 
-**Benefits:**
-- Single source of truth for each provider
-- No scattered metadata across files
-- Easy to add providers (one registry entry)
+### 2. `factory.py`
 
-### 2. Provider Registry (provider_registry.py)
+Resolves a provider name to a `ProviderConfig`, then instantiates the
+appropriate client class. `OpenAIClient` is special-cased because it
+serves multiple OpenAI-compatible providers and needs the provider
+name to resolve its internal base-URL / API-key maps.
 
-```python
-PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
-    "groq": ProviderConfig(...),
-    "openai": ProviderConfig(...),
-    ...
-}
-```
+### 3. Client classes (one per native API)
 
-All providers are registered here. Factory looks them up by name.
+- `OpenAIClient` — OpenAI, Groq, xAI, DeepSeek, Qwen, GLM, MiniMax,
+  OpenRouter, Ollama (all OpenAI-compatible).
+- `AnthropicClient` — Claude models.
+- `GoogleClient` — Gemini models.
+- `AzureOpenAIClient` — Azure-hosted OpenAI deployments.
 
-### 3. Client Classes
+Each inherits from `BaseLLMClient` and implements `get_llm()` and
+`validate_model()`.
 
-Each provider has a client class (e.g., `OpenAIClient`, `AnthropicClient`) that:
-- Inherits from `BaseLLMClient`
-- Implements `get_llm()` and `validate_model()`
-- Handles provider-specific quirks (authentication, parameter differences)
+### 4. `capabilities.py`
 
-For OpenAI-compatible providers (Groq, DeepSeek, Ollama), they all use `OpenAIClient`.
+Declares per-model API quirks (does the model accept `tool_choice`?
+JSON schema response_format?). The OpenAI-compatible client subclasses
+consult this table instead of hardcoding model-name `if` ladders.
 
-### 4. Capabilities Matrix (capabilities.py)
+Lookup precedence: exact-ID match → regex pattern → `_DEFAULT`
+(permissive).
 
-Declares what each model supports:
+### 5. `model_catalog.py`
 
-```python
-@dataclass
-class ModelCapabilities:
-    supports_tool_choice: bool              # Can use tool_choice parameter?
-    supports_json_mode: bool                # Can use JSON mode?
-    supports_json_schema: bool              # Can use JSON schema?
-    preferred_structured_method: str        # "function_calling" or "json_mode"
-```
-
-Lookup: `get_capabilities(model_name)` returns capabilities for that model.
-
-### 5. Factory (factory.py)
-
-```python
-def create_llm_client(provider: str, model: str, base_url: Optional[str] = None) -> BaseLLMClient:
-    config = PROVIDER_REGISTRY[provider]
-    return config.client_class(model=model, base_url=base_url or config.base_url, ...)
-```
-
-Simple registry lookup + client instantiation.
+The list of models shown in CLI dropdowns, organized by provider and
+selection mode (quick vs deep). Used by the CLI for interactive
+selection and by `validators.validate_model()` for warning on unknown
+model names.
 
 ## Data Flow
 
 ```
-User calls: create_llm_client("groq", "llama-3.3-70b-versatile")
-    ↓
-Factory looks up "groq" in PROVIDER_REGISTRY
-    ↓
-Gets ProviderConfig (base_url, api_key_env, etc.)
-    ↓
-Instantiates OpenAIClient with Groq's base_url and API key
-    ↓
-Client calls LangChain's ChatOpenAI
-    ↓
-ChatOpenAI sends request to https://api.groq.com/openai/v1
-    ↓
-Response returned to caller
+create_llm_client("groq", "llama-3.3-70b-versatile")
+        │
+        ▼
+PROVIDER_REGISTRY["groq"]  →  ProviderConfig(client_class=OpenAIClient,
+                                              base_url="https://api.groq.com/openai/v1",
+                                              api_key_env="GROQ_API_KEY")
+        │
+        ▼  (factory: special-cases OpenAIClient to pass provider= kwarg)
+OpenAIClient(model=..., base_url=..., provider="groq")
+        │
+        ▼  client.get_llm()
+NormalizedChatOpenAI(model=..., base_url=..., api_key=<from env>)
 ```
 
-## Adding a New Provider
+## Why a Registry?
 
-See [Adding a Provider](adding-a-provider.md) for step-by-step instructions.
+Before: provider metadata was scattered across `factory.py` (conditionals),
+`openai_client.py` (`_PROVIDER_BASE_URL`), `api_key_env.py` (env var map),
+and `model_catalog.py` (model list).
 
-TL;DR: One registry entry + a client class (if not OpenAI-compatible) + tests + docs.
+After: registry consolidates **who** is registered. Per-implementation
+details (base URLs for OpenAI-compatible providers, model lists) still
+live in their natural homes, but the registry tells you at a glance
+which providers exist and which client class serves each.
+
+See [Adding a Provider](adding-a-provider.md) for the workflow.
 ```
 
 - [ ] **Step 3: Create docs/providers/adding-a-provider.md**
@@ -949,127 +998,149 @@ File: `docs/providers/adding-a-provider.md`
 ```markdown
 # Adding a New Provider
 
-This guide walks you through adding a new LLM provider to the system.
+Two paths depending on whether the provider exposes an OpenAI-compatible
+endpoint.
 
-## Prerequisites
+## Path A: OpenAI-Compatible Provider (~15 minutes)
 
-- Provider has a public API
-- Provider has Python SDK or OpenAI-compatible endpoint
-- You have API credentials for testing
+Most third-party providers (Groq, xAI, DeepSeek, OpenRouter, etc.) expose
+an OpenAI-compatible Chat Completions API. You can reuse `OpenAIClient`.
 
-## Step 1: Add Provider Configuration
+### Step 1: Register the provider
 
-Edit `tradingagents/llm_clients/provider_registry.py`:
+`tradingagents/llm_clients/provider_registry.py` — add an entry to the
+`openai_compatible` dict inside `_build_registry()`:
 
 ```python
-PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
-    ...
-    "newprovider": ProviderConfig(
-        name="newprovider",
-        client_class=OpenAIClient,  # or CustomClient if not OpenAI-compatible
-        base_url="https://api.newprovider.com/v1",
-        api_key_env="NEWPROVIDER_API_KEY",
-        models=MODEL_OPTIONS.get("newprovider", {}),
-    ),
-}
+"newprovider": ("https://api.newprovider.com/v1", "NEWPROVIDER_API_KEY"),
 ```
 
-## Step 2: Add Models to Catalog
+### Step 2: Mirror the base URL in OpenAIClient's internal map
 
-Edit `tradingagents/llm_clients/model_catalog.py`:
+`tradingagents/llm_clients/openai_client.py` — add to `_PROVIDER_BASE_URL`:
+
+```python
+"newprovider": "https://api.newprovider.com/v1",
+```
+
+### Step 3: Add the API-key env var
+
+`tradingagents/llm_clients/api_key_env.py` — add to `PROVIDER_API_KEY_ENV`:
+
+```python
+"newprovider": "NEWPROVIDER_API_KEY",
+```
+
+### Step 4: Add to factory's OpenAI-compatible tuple
+
+`tradingagents/llm_clients/factory.py` — already routes through the registry,
+no change needed.
+
+### Step 5: Add models to the catalog
+
+`tradingagents/llm_clients/model_catalog.py`:
 
 ```python
 _NEWPROVIDER_MODELS: Dict[str, List[ModelOption]] = {
     "quick": [
-        ("Model A - Fast", "model-a-fast"),
-        ("Model B - Balanced", "model-b"),
+        ("Fast model", "newprovider-fast"),
+        ("Custom model ID", "custom"),
     ],
     "deep": [
-        ("Model C - Most Capable", "model-c-pro"),
+        ("Best model", "newprovider-pro"),
+        ("Custom model ID", "custom"),
     ],
 }
 
-MODEL_OPTIONS: ProviderModeOptions = {
-    ...
-    "newprovider": _NEWPROVIDER_MODELS,
-}
+MODEL_OPTIONS["newprovider"] = _NEWPROVIDER_MODELS
 ```
 
-## Step 3: Add Capabilities (if Needed)
+### Step 6: Add to the CLI provider list
 
-Edit `tradingagents/llm_clients/capabilities.py`:
+`cli/utils.py` — inside `select_llm_provider()`, add a tuple in the providers
+list with display name, key, and default base URL.
+
+### Step 7: Capabilities (optional)
+
+If models have unusual quirks (e.g., reject `tool_choice`), add entries to
+`capabilities._BY_ID`. Otherwise they inherit the permissive `_DEFAULT`.
+
+### Step 8: Add tests
+
+Create `tests/test_newprovider.py` following the pattern in `tests/test_groq.py`:
 
 ```python
-_NEWPROVIDER_CONFIG = ModelCapabilities(
-    supports_tool_choice=True,      # Can use tool_choice?
-    supports_json_mode=True,         # Can use JSON mode?
-    supports_json_schema=False,      # Can use JSON schema?
-    preferred_structured_method="function_calling",
+@pytest.mark.unit
+class TestNewProviderClientConstruction:
+    def test_factory_returns_openai_client(self):
+        client = create_llm_client("newprovider", "model-x")
+        assert isinstance(client, OpenAIClient)
+        assert client.provider == "newprovider"
+```
+
+Also extend `tests/test_provider_registry.py::_EXPECTED_PROVIDERS` to include
+your provider.
+
+### Step 9: Update docs
+
+- Add a row to `docs/providers/README.md` provider table.
+- Add a row to `docs/providers/capability-matrix.md`.
+- Optionally create `docs/providers/newprovider-setup-and-usage.md`.
+
+### Step 10: Verify
+
+```bash
+pytest tests/test_newprovider.py tests/test_provider_registry.py -v
+pytest tests/ -v
+```
+
+---
+
+## Path B: Native (non-OpenAI-compatible) Provider (~2 hours)
+
+If the provider has a custom API (like Anthropic's Messages API or Google's
+GenAI), you'll need a dedicated client class.
+
+### Step 1: Create the client class
+
+`tradingagents/llm_clients/newprovider_client.py`, modeled on
+`anthropic_client.py`:
+
+```python
+from typing import Any, Optional
+
+from .base_client import BaseLLMClient, normalize_content
+
+
+class NewProviderClient(BaseLLMClient):
+    def __init__(self, model: str, base_url: Optional[str] = None, **kwargs):
+        super().__init__(model, base_url, **kwargs)
+
+    def get_llm(self) -> Any:
+        self.warn_if_unknown_model()
+        # Instantiate the langchain wrapper / SDK client here.
+        ...
+
+    def validate_model(self) -> bool:
+        from .validators import validate_model
+        return validate_model("newprovider", self.model)
+```
+
+### Step 2: Register in provider_registry.py
+
+```python
+from tradingagents.llm_clients.newprovider_client import NewProviderClient
+registry["newprovider"] = ProviderConfig(
+    name="newprovider", client_class=NewProviderClient,
+    base_url=None, api_key_env="NEWPROVIDER_API_KEY",
 )
-
-_BY_ID: dict[str, ModelCapabilities] = {
-    ...
-    "model-a-fast": _NEWPROVIDER_CONFIG,
-    "model-b": _NEWPROVIDER_CONFIG,
-    "model-c-pro": _NEWPROVIDER_CONFIG,
-}
 ```
 
-## Step 4: Create or Use Existing Client Class
+The factory's "special-case OpenAIClient" branch ensures your client
+receives only `(model, base_url, **kwargs)` — it won't get an unwanted
+`provider` kwarg.
 
-If OpenAI-compatible: No new client needed (registry already uses `OpenAIClient`).
-
-If custom API:
-- Create `tradingagents/llm_clients/newprovider_client.py`
-- Inherit from `BaseLLMClient`
-- Implement `get_llm()` and `validate_model()`
-- Update registry to use your client class
-
-## Step 5: Add Tests
-
-Create `tests/llm_clients/test_newprovider_*.py`:
-
-```python
-from unittest.mock import patch
-from tradingagents.llm_clients.factory import create_llm_client
-
-@patch("langchain_...ChatOpenAI._make_request")
-def test_newprovider_chat(mock_request):
-    mock_request.return_value = {"choices": [{"message": {"content": "OK"}}]}
-    
-    client = create_llm_client("newprovider", "model-a-fast")
-    llm = client.get_llm()
-    response = llm.invoke([("human", "Test")])
-    
-    assert response.content == "OK"
-```
-
-Run: `pytest tests/llm_clients/test_newprovider_*.py -v`
-
-## Step 6: Update Documentation
-
-Add your provider to:
-- `docs/providers/README.md` (Supported Providers list)
-- `docs/providers/capability-matrix.md` (Feature table)
-- Create `docs/providers/newprovider-setup.md` (if provider-specific config needed)
-
-## Step 7: Verify Everything
-
-```bash
-pytest tests/llm_clients/ -v          # All tests pass
-pytest tests/ -v                      # No regressions
-```
-
-## Step 8: Commit
-
-```bash
-git commit -m "feat: add newprovider support"
-```
-
-## Timeline
-
-If OpenAI-compatible: ~30 minutes (steps 1-8)
-If custom client: ~2 hours (steps 1-8 + client implementation + testing)
+### Step 3-10: Same as Path A.
 ```
 
 - [ ] **Step 4: Create docs/providers/groq-setup-and-usage.md**
@@ -1077,37 +1148,30 @@ If custom client: ~2 hours (steps 1-8 + client implementation + testing)
 File: `docs/providers/groq-setup-and-usage.md`
 
 ```markdown
-# Groq Setup & Usage Guide
+# Groq Setup & Usage
 
-## What is Groq?
-
-Groq provides ultra-fast inference of open-source Llama models via an OpenAI-compatible API.
-
-**Key Features:**
-- Free tier with rate limits (good for testing)
-- Models: Llama 3.1, 3.3, Llama 4 (Scout, Maverick)
-- Ultra-low latency
-- OpenAI-compatible endpoint
+Groq provides ultra-fast inference for open-source Llama models via an
+OpenAI-compatible API. A free tier with rate limits is available.
 
 ## Getting Started
 
-### 1. Get API Key
+### 1. Get an API key
 
-Visit: https://console.groq.com  
-Sign up → Create API key
+Sign up at https://console.groq.com and create an API key.
 
-### 2. Set Environment Variable
+### 2. Set the environment variable
 
 ```bash
-export GROQ_API_KEY="your_key_here"
+export GROQ_API_KEY="gsk_..."
 ```
 
-Or add to `.env`:
+Or add it to your `.env` file:
+
 ```
-GROQ_API_KEY=your_key_here
+GROQ_API_KEY=gsk_...
 ```
 
-### 3. Use in Code
+### 3. Use it in code
 
 ```python
 from tradingagents.llm_clients.factory import create_llm_client
@@ -1115,129 +1179,69 @@ from tradingagents.llm_clients.factory import create_llm_client
 client = create_llm_client("groq", "llama-3.3-70b-versatile")
 llm = client.get_llm()
 
-response = llm.invoke([("human", "What is AI?")])
+response = llm.invoke([("human", "Summarize the merger arbitrage strategy.")])
 print(response.content)
 ```
 
-## Available Models
+## CLI
 
-### Quick Mode (Fast, Lower Accuracy)
+The CLI offers Groq in the provider list ("Groq (Free tier — Llama 3.3 / Llama 4)"),
+with model choices defined in `model_catalog.py`.
 
-- **Llama 3.1 8B Instant** (`llama-3.1-8b-instant`)
-  - Fastest, cheapest
-  - Good for simple tasks
-  - Free tier friendly
+## Models
 
-- **Llama 3.3 70B SpecDec** (`llama-3.3-70b-specdec`)
-  - Fast with speculative decoding
-  - Balanced speed/accuracy
+### Quick mode (lower latency)
 
-- **Llama 4 Scout 17B** (`meta-llama/llama-4-scout-17b-16e-instruct`)
-  - Meta's Llama 4, low latency
-  - Lightweight alternative to 70B
+| Model ID | Notes |
+|----------|-------|
+| `llama-3.1-8b-instant` | Fastest, cheapest |
+| `llama-3.3-70b-specdec` | 70B with speculative decoding |
+| `meta-llama/llama-4-scout-17b-16e-instruct` | Llama 4 Scout |
 
-### Deep Mode (Slower, Higher Accuracy)
+### Deep mode (higher accuracy)
 
-- **Llama 3.3 70B Versatile** (`llama-3.3-70b-versatile`)
-  - Recommended for quality
-  - Free tier available
-  - Good for agent tasks
+| Model ID | Notes |
+|----------|-------|
+| `llama-3.3-70b-versatile` | Recommended default |
+| `meta-llama/llama-4-maverick-17b-128e-instruct` | Llama 4 Maverick |
+| `llama-3.1-70b-versatile` | Previous-gen flagship |
 
-- **Llama 4 Maverick 17B** (`meta-llama/llama-4-maverick-17b-128e-instruct`)
-  - Meta's Llama 4, strong reasoning
-  - Lightweight but more capable
+The full list lives in
+[`tradingagents/llm_clients/model_catalog.py`](../../tradingagents/llm_clients/model_catalog.py).
 
-- **Llama 3.1 70B Versatile** (`llama-3.1-70b-versatile`)
-  - Previous-gen 70B model
-  - Still excellent quality
+## Feature Support
 
-## Rate Limits (Free Tier)
+See [capability-matrix.md](capability-matrix.md) for a per-feature table.
+At a glance: tools and JSON mode are supported; JSON schema is not.
 
-- **RPM (Requests Per Minute):** 30
-- **TPM (Tokens Per Minute):** 6,000
-- **Max tokens per request:** 12,000
+## Free Tier Rate Limits
 
-For production, upgrade to paid tier.
+Groq publishes per-model rate limits at
+https://console.groq.com/docs/rate-limits. As of writing, free-tier
+accounts have ~30 RPM and a per-minute token budget that varies by
+model. Production workloads should upgrade to a paid tier.
 
-## Features Support
+If you hit rate limits, the OpenAI SDK will surface a 429 error
+through langchain. Wait 60 seconds, switch to a smaller model
+(`llama-3.1-8b-instant`), or upgrade your Groq account.
 
-| Feature | Support | Notes |
-|---------|---------|-------|
-| Chat Completions | ✅ Yes | Basic chat |
-| Tool Calling | ✅ Yes | Function tools supported |
-| Structured Output | ⚠️ Partial | JSON mode yes, JSON schema no |
-| Streaming | ✅ Yes | Server-Sent Events |
-| Async | ✅ Yes | Full async/await support |
+## Custom endpoint
 
-## Example: Tool Calling
+You can route Groq through a proxy by passing `base_url`:
 
 ```python
-from tradingagents.llm_clients.factory import create_llm_client
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get weather for a location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City name"}
-                },
-                "required": ["location"],
-            }
-        }
-    }
-]
-
-client = create_llm_client("groq", "llama-3.3-70b-versatile")
-llm = client.get_llm()
-
-response = llm.invoke(
-    [("human", "What's the weather in NYC?")],
-    tools=tools
+client = create_llm_client(
+    "groq",
+    "llama-3.3-70b-versatile",
+    base_url="https://your-proxy.example.com/v1",
 )
-
-# Check if there are tool calls
-if response.tool_calls:
-    for call in response.tool_calls:
-        print(f"Tool: {call['function']['name']}")
-        print(f"Args: {call['function']['arguments']}")
 ```
 
-## Example: Structured Output (JSON Mode)
-
-```python
-client = create_llm_client("groq", "llama-3.3-70b-versatile")
-llm = client.get_llm()
-
-response = llm.invoke(
-    [("human", "Extract user info from: John Doe, age 30, NYC")],
-    response_format={"type": "json_object"}
-)
-
-# response.content will be JSON-formatted
-print(response.content)
-```
+The default endpoint is `https://api.groq.com/openai/v1`.
 
 ## Troubleshooting
 
-See [Troubleshooting](troubleshooting.md) for common issues.
-
-**Common error: "GROQ_API_KEY not set"**
-→ Make sure you've set the environment variable (see step 2 above)
-
-**Common error: "Rate limit exceeded"**
-→ You've hit the free tier RPM limit. Wait 60 seconds or upgrade account.
-
-**Common error: "Model not found"**
-→ Check model ID spelling. Use the exact ID from "Available Models" above.
-
-## More Info
-
-- Groq API Docs: https://console.groq.com/docs
-- Llama Model Docs: https://github.com/meta-llama/llama-models
+See [troubleshooting.md](troubleshooting.md).
 ```
 
 - [ ] **Step 5: Create docs/providers/capability-matrix.md**
@@ -1247,44 +1251,37 @@ File: `docs/providers/capability-matrix.md`
 ```markdown
 # Provider Capability Matrix
 
-This table shows which features each provider and model supports.
+What each provider/model accepts at the API layer. Entries marked `?`
+need verification; update as research finishes.
 
-| Provider | Model | Tool Calling | Tool Choice | JSON Mode | JSON Schema | Streaming | Async |
-|----------|-------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Groq** | llama-3.3-70b-versatile | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ |
-| | llama-3.1-8b-instant | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ |
-| | llama-4-maverick | ✅ | ⚠️ | ✅ | ❌ | ✅ | ✅ |
-| **OpenAI** | gpt-5.5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| | gpt-5.4 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| | gpt-4.1 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Anthropic** | claude-opus-4-7 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| | claude-sonnet-4-6 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| | claude-haiku-4-5 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
-| **Google** | gemini-3-flash | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| | gemini-2.5-pro | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **DeepSeek** | deepseek-v4-pro | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
-| **Ollama** | llama2 | ✅ | ❌ | ❌ | ❌ | ✅ | ⚠️ |
+| Provider | Representative model | Tools | tool_choice | JSON mode | JSON schema | Streaming | Async |
+|----------|----------------------|:-----:|:-----------:|:---------:|:-----------:|:---------:|:-----:|
+| Groq | llama-3.3-70b-versatile | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Groq | llama-3.1-8b-instant | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| Groq | meta-llama/llama-4-* | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| OpenAI | gpt-5.5 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Anthropic | claude-sonnet-4-6 | ✅ | ✅ | n/a | n/a | ✅ | ✅ |
+| Google | gemini-2.5-pro | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| DeepSeek | deepseek-v4-pro | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
+| MiniMax | MiniMax-M2.7 | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Ollama | (any) | ✅ | varies | varies | ❌ | ✅ | ✅ |
 
-**Legend:**
-- ✅ = Supported
-- ❌ = Not supported
-- ⚠️ = Partial / Conditional support
+Legend: ✅ supported · ❌ not supported · `?` unverified · n/a not applicable.
 
-**Notes:**
-- **Tool Calling:** Does the model support function calling (tools array)?
-- **Tool Choice:** Can you specify which tool to use (`tool_choice="auto"`)?
-- **JSON Mode:** Can you force JSON output with `response_format={"type": "json_object"}`?
-- **JSON Schema:** Can you enforce a specific JSON schema structure?
-- **Streaming:** Can you stream responses token-by-token?
-- **Async:** Can you use async/await with this model?
+The authoritative declaration lives in
+[`tradingagents/llm_clients/capabilities.py`](../../tradingagents/llm_clients/capabilities.py).
+This table is for human reference and may lag the code.
 
-### When to Use Which Feature
+## What each column means
 
-**Tool Calling:** Building agents that need to call functions/APIs  
-**JSON Mode:** When you need structured output but not a specific schema  
-**JSON Schema:** When you need strict schema enforcement (OpenAI only currently)  
-**Streaming:** Real-time updates to the user  
-**Async:** High-concurrency applications
+- **Tools** — model accepts a `tools=[...]` array of function definitions.
+- **tool_choice** — model accepts the `tool_choice` parameter (`"auto"`,
+  `"required"`, or a specific function spec). When false, langchain still
+  binds the schema as a tool but must omit `tool_choice`.
+- **JSON mode** — `response_format={"type": "json_object"}` is honored.
+- **JSON schema** — `response_format={"type": "json_schema", "schema": {...}}`
+  is honored (stricter; usually OpenAI-only).
+- **Streaming / Async** — `stream()`, `astream()`, `ainvoke()` work.
 ```
 
 - [ ] **Step 6: Create docs/providers/troubleshooting.md**
@@ -1294,281 +1291,200 @@ File: `docs/providers/troubleshooting.md`
 ```markdown
 # Troubleshooting
 
-## Common Issues
+## "API key for provider 'groq' is not set"
 
-### "API key not set" / "API key is empty"
+`OpenAIClient.get_llm()` raises this when `GROQ_API_KEY` is missing.
 
-**Symptom:** Error when calling `create_llm_client()`
+Fix: set the env var in your shell or `.env`.
 
-**Cause:** Environment variable not set
-
-**Fix:**
 ```bash
-export GROQ_API_KEY="your_key"
-# Or in .env:
-# GROQ_API_KEY=your_key
+export GROQ_API_KEY="gsk_..."
 ```
 
-Verify it's set:
-```python
-import os
-print(os.environ.get("GROQ_API_KEY"))  # Should print your key
-```
+Verify:
 
-### "Unsupported LLM provider: xyz"
-
-**Symptom:** `ValueError: Unsupported LLM provider: xyz`
-
-**Cause:** Provider name not recognized or not in registry
-
-**Fix:** Check provider name spelling. Valid providers: `groq`, `openai`, `anthropic`, `google`, `azure`, `ollama`, etc.
-
-### "Rate limit exceeded"
-
-**Symptom:** Groq returns 429 error
-
-**Cause:** Hit free tier rate limit (30 RPM, 6K TPM)
-
-**Fix:**
-- Wait 60 seconds and retry
-- Use smaller models (8B instead of 70B)
-- Reduce request frequency
-- Upgrade to paid Groq account
-
-### "Tool calling not working"
-
-**Symptom:** Tool calls not returned in response
-
-**Cause:** Model doesn't support tool calling, or tools array not sent correctly
-
-**Fix:**
-- Check [Capability Matrix](capability-matrix.md) — does your model support tools?
-- Verify `tools` parameter is correctly formatted
-- Check that you're using the right model
-
-```python
-# Correct format:
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "my_function",
-            "description": "...",
-            "parameters": {...}
-        }
-    }
-]
-
-response = llm.invoke([...], tools=tools)
-```
-
-### "JSON mode returning non-JSON"
-
-**Symptom:** Response doesn't look like valid JSON
-
-**Cause:** JSON mode enabled but model not enforcing it
-
-**Fix:**
-- Some models (Llama) don't strictly enforce JSON mode
-- Parse what you get and handle errors
-- Consider using JSON Schema if available for your provider
-
-### "Import error: No module named 'langchain_openai'"
-
-**Symptom:** `ModuleNotFoundError: No module named 'langchain_openai'`
-
-**Cause:** Missing dependency
-
-**Fix:**
 ```bash
-pip install langchain-openai
+python -c "import os; print('set' if os.environ.get('GROQ_API_KEY') else 'missing')"
 ```
 
-Or upgrade:
+## "Unsupported LLM provider: ..."
+
+`create_llm_client()` raises `ValueError` when the provider name isn't
+in the registry. Valid names live in
+[`provider_registry.py`](../../tradingagents/llm_clients/provider_registry.py).
+
+Common slips: `"Groq"` vs `"groq"` (the factory lowercases, so both
+work, but configuration files sometimes don't).
+
+## 429 rate limit errors from Groq
+
+The free tier has tight per-minute limits. Options:
+
+- Wait and retry.
+- Switch to `llama-3.1-8b-instant` (looser limits).
+- Upgrade the Groq account.
+
+## Tool calls aren't returned
+
+If `response.tool_calls` is empty after binding tools:
+
+- Check the [capability matrix](capability-matrix.md) — does the model
+  support tools?
+- Confirm the tool schema is well-formed (the OpenAI tool-spec shape).
+- For DeepSeek thinking / MiniMax M2.x: the client suppresses
+  `tool_choice` automatically; the schema is still bound as a tool.
+
+## JSON mode returns text that isn't valid JSON
+
+Llama-family models sometimes hallucinate JSON syntax. Mitigations:
+
+- Use a stricter prompt ("Respond ONLY with a JSON object…").
+- Wrap parsing in `try/except json.JSONDecodeError` and retry once.
+- If your provider supports `json_schema` (OpenAI, Google), prefer
+  that over `json_object`.
+
+## Custom Ollama model fails
+
+`OLLAMA_BASE_URL` controls where the client connects. If you're
+running ollama-serve on a remote host:
+
 ```bash
-pip install --upgrade langchain-openai
+export OLLAMA_BASE_URL="http://10.0.0.5:11434/v1"
 ```
 
-### "Custom model ID not working"
+The CLI surfaces the resolved endpoint after provider selection
+(via `cli/utils.confirm_ollama_endpoint`).
 
-**Symptom:** Model name not recognized by provider
+## "Model 'X' is not in the known model list..."
 
-**Cause:** Model ID doesn't exist or isn't available to your account
-
-**Fix:**
-- Check official provider docs for valid model IDs
-- Verify your account has access to the model
-- Check Groq console for available models: https://console.groq.com/docs/models
-
-## Performance Issues
-
-### "Response is very slow"
-
-**Cause:** Using a larger, slower model
-
-**Fix:** Try a smaller model:
-- Groq: Use `llama-3.1-8b-instant` instead of `llama-3.3-70b-versatile`
-- OpenAI: Use `gpt-5.4-mini` instead of `gpt-5.5`
-
-### "Timeout errors"
-
-**Cause:** Request taking too long or network issue
-
-**Fix:**
-- Increase timeout:
-  ```python
-  client = create_llm_client("groq", "model", timeout=60)
-  ```
-- Use async:
-  ```python
-  response = await llm.ainvoke([...])
-  ```
-- Try a faster model
-
-## Still Stuck?
-
-1. Check the provider's official documentation
-2. Check your API quota/rate limits in provider console
-3. Ask in #engineering Slack or create an issue on GitHub
-
-Include:
-- Provider name
-- Model ID
-- Error message (full traceback)
-- What you were trying to do
+A `RuntimeWarning`, not an error. The call proceeds. To silence,
+add the model ID to the relevant entry in `model_catalog.py`.
 ```
 
 - [ ] **Step 7: Commit all documentation**
 
 ```bash
 git add docs/providers/
-git commit -m "docs: add comprehensive provider documentation and guides"
+git commit -m "docs: add provider system guide (architecture, Groq, capability matrix, troubleshooting)"
 ```
 
 ---
 
-## Phase 5: Polish & Verification
-
-### Task 12: Smoke Test with Trading Agent
+### Task 10: Link Docs from README.md
 
 **Files:**
-- No code changes
-- Test: Manual verification with real trading agent
+- Modify: `README.md`
 
-- [ ] **Step 1: Start the application**
+- [ ] **Step 1: Find an appropriate section in README.md**
+
+Open `README.md`. Look for a section about LLM provider configuration (likely near setup / env vars).
+
+- [ ] **Step 2: Add a docs link**
+
+Insert a short paragraph near the provider configuration content (use Edit with enough surrounding context to disambiguate):
+
+```markdown
+For detailed provider setup, architecture, and a feature support matrix,
+see [`docs/providers/`](docs/providers/README.md).
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add README.md
+git commit -m "docs(readme): link to providers documentation"
+```
+
+---
+
+## Phase 5: Verification
+
+### Task 11: Live Smoke Test with Groq
+
+**Prerequisites:** Real `GROQ_API_KEY` set in env / `.env`.
+
+- [ ] **Step 1: Run the CLI**
 
 ```bash
 python main.py
 ```
 
-Or start with a test trading agent script if available.
+- [ ] **Step 2: Select Groq and a model**
 
-- [ ] **Step 2: Select Groq as provider**
+When prompted:
+- Provider: **Groq (Free tier — Llama 3.3 / Llama 4)**
+- Mode: **quick** or **deep**
+- Model: **`llama-3.3-70b-versatile`** (a known-good default)
 
-When prompted for provider selection, choose "groq".
+- [ ] **Step 3: Run a small trading task**
 
-- [ ] **Step 3: Select a Groq model**
+Use a simple ticker the system already supports. Observe:
+- ✅ Calls succeed (no `ValueError` from missing key).
+- ✅ Responses come back as strings (content normalization works).
+- ✅ Any structured-output / tool-using agents in the run produce
+      valid outputs.
 
-Choose one of the available Groq models (e.g., `llama-3.3-70b-versatile`).
+- [ ] **Step 4: Record findings**
 
-- [ ] **Step 4: Run a trading task**
-
-Execute a normal trading agent task and verify:
-- Chat completions work
-- Response parsing is correct
-- No errors in logs
-- Response content is properly formatted
-
-- [ ] **Step 5: Document results**
-
-Record in a comment or note:
-- Model tested
-- Task executed
-- Any issues encountered
-- Performance (latency, quality)
+If anything fails, file an issue or add a follow-up task to this plan.
+If the smoke test succeeds, note the model + task + observations
+inline in the PR description for the change.
 
 ---
 
-### Task 13: Final Verification & Cleanup
+### Task 12: Final Verification
 
-**Files:**
-- All modified files from phases 1-4
-
-- [ ] **Step 1: Run full test suite**
+- [ ] **Step 1: Full test suite**
 
 ```bash
-pytest tests/ -v
+pytest tests/ -v --tb=short
 ```
 
-Expected: **ALL PASS** — No regressions.
+Expected: **ALL PASS**.
 
-- [ ] **Step 2: Check code style**
+- [ ] **Step 2: Verify backward compatibility manually**
+
+Spot-check that legacy callers still work:
+
+```python
+# Should still return clients (no exceptions).
+from tradingagents.llm_clients.factory import create_llm_client
+
+create_llm_client("openai", "gpt-5.5")
+create_llm_client("anthropic", "claude-sonnet-4-6")
+create_llm_client("google", "gemini-2.5-flash")
+create_llm_client("deepseek", "deepseek-chat")
+create_llm_client("ollama", "qwen3:latest")
+```
+
+- [ ] **Step 3: Inspect commit history**
 
 ```bash
-# If using black, isort, pylint, etc.:
-black tradingagents/llm_clients/ --check
-isort tradingagents/llm_clients/ --check
+git log --oneline origin/main..HEAD
 ```
 
-Fix any style issues.
+Verify commits are coherent: research / dep / conftest / tests / registry / factory / capabilities / docs / readme.
 
-- [ ] **Step 3: Review final code**
-
-Check:
-- No TODO/FIXME comments (except intentional ones)
-- All functions have docstrings
-- Type hints are present
-- No hardcoded values (use registry/env vars)
-
-- [ ] **Step 4: Verify documentation links**
-
-Check that:
-- README.md links to /docs/providers/
-- All provider docs are reachable
-- Code examples in docs are correct
-
-- [ ] **Step 5: Create final commit**
+- [ ] **Step 4: (Optional) Open a PR**
 
 ```bash
-git log --oneline | head -20
-# Verify commits are clear and follow convention
-```
-
-If needed, squash or reword commits:
-```bash
-git rebase -i origin/main
-```
-
-- [ ] **Step 6: Create a summary of changes**
-
-Document in a comment or PR description:
-- What was implemented (Groq + provider registry)
-- Tests added/verified
-- Docs created
-- Backward compatibility maintained
-
-Example:
-```
+gh pr create --title "feat: complete Groq integration via provider registry" --body "$(cat <<'EOF'
 ## Summary
 
-✅ **Groq Provider Support Complete**
-- Full Groq integration (chat, tools, structured output, async)
-- Provider registry pattern for extensibility
-- 5 new test files, all passing
-- Comprehensive docs in /docs/providers/
-- Backward compatible with existing code
+- Verified Groq provider works end-to-end (chat / tools / structured output / async).
+- Introduced `provider_registry.py` as the single source of truth for provider metadata.
+- Factory now dispatches through the registry while preserving backward compatibility.
+- Added comprehensive provider documentation under `docs/providers/`.
 
-## Changes
-- [+] tradingagents/llm_clients/provider_registry.py (new)
-- [+] tests/llm_clients/test_groq_*.py (5 new test files)
-- [+] docs/providers/ (6 new markdown docs)
-- [~] tradingagents/llm_clients/factory.py (refactored to use registry)
-- [~] tradingagents/llm_clients/capabilities.py (added Groq entries)
+## Test plan
 
-## Tests
-- All 40+ tests passing
-- No regressions in existing tests
-- Smoke test with trading agent: ✅ PASS
+- [ ] `pytest tests/ -v` passes locally.
+- [ ] Smoke test with a real `GROQ_API_KEY` against `llama-3.3-70b-versatile`.
+- [ ] CI green.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+EOF
+)"
 ```
 
 ---
@@ -1576,76 +1492,103 @@ Example:
 ## File Structure Summary
 
 **Created:**
+
 ```
 tradingagents/llm_clients/
-  provider_registry.py          (NEW — provider config registry)
+  provider_registry.py            (NEW)
 
-tests/llm_clients/
-  test_provider_registry.py     (NEW)
-  test_groq_chat.py             (NEW)
-  test_groq_tools.py            (NEW)
-  test_groq_structured_output.py (NEW)
-  test_groq_async.py            (NEW)
-  test_capabilities_matrix.py   (NEW)
+tests/
+  test_groq.py                    (NEW)
+  test_provider_registry.py       (NEW)
 
 docs/providers/
-  README.md                     (NEW)
-  architecture.md               (NEW)
-  adding-a-provider.md          (NEW)
-  groq-setup-and-usage.md       (NEW)
-  capability-matrix.md          (NEW)
-  troubleshooting.md            (NEW)
+  README.md                       (NEW)
+  architecture.md                 (NEW)
+  adding-a-provider.md            (NEW)
+  groq-setup-and-usage.md         (NEW)
+  capability-matrix.md            (NEW)
+  troubleshooting.md              (NEW)
 ```
 
 **Modified:**
+
 ```
 tradingagents/llm_clients/
-  factory.py                    (refactored to use registry)
-  capabilities.py               (added Groq entries)
-  api_key_env.py                (verified GROQ_API_KEY exists)
+  factory.py                      (dispatch via registry)
+  capabilities.py                 (Groq entries — only if research shows quirks)
+
+tests/
+  test_capabilities.py            (append Groq capability tests)
+  conftest.py                     (add GROQ_API_KEY to dummy-key fixture)
+
+pyproject.toml                    (add pytest-asyncio + asyncio_mode)
+README.md                         (link to docs/providers/)
+```
+
+**Unchanged (intentionally):**
+
+```
+tradingagents/llm_clients/openai_client.py     (already handles Groq)
+tradingagents/llm_clients/api_key_env.py       (GROQ_API_KEY already mapped)
+tradingagents/llm_clients/model_catalog.py     (Groq models already listed)
+cli/utils.py                                   (Groq already in CLI list)
 ```
 
 ---
 
 ## Success Checklist
 
-- [ ] All 13 tasks completed
-- [ ] All tests passing (`pytest tests/ -v`)
-- [ ] No regressions in existing functionality
-- [ ] Groq tested end-to-end with trading agent
-- [ ] Documentation complete and reviewed
-- [ ] Code committed with clear messages
-- [ ] Registry pattern is extensible (new providers take <30 min to add)
-- [ ] Backward compatibility maintained
+- [ ] Phase 0 research findings documented in this plan
+- [ ] `pytest-asyncio` installed and `asyncio_mode = "auto"` configured
+- [ ] All new and existing tests pass (`pytest tests/ -v`)
+- [ ] `tests/test_provider_registry.py` covers every legacy provider
+- [ ] Live smoke test with a real Groq key succeeds
+- [ ] Documentation under `docs/providers/` is complete and linked from README
+- [ ] All commits are coherent and follow repo convention
 
 ---
 
 ## Estimated Timeline
 
-- **Phase 0 (Research):** 30 min
-- **Phase 1 (Tests):** 1.5 hours
-- **Phase 2 (Registry):** 1 hour
-- **Phase 3 (Verification):** 1 hour
-- **Phase 4 (Docs):** 1.5 hours
-- **Phase 5 (Smoke test):** 30 min
+| Phase | Work | Time |
+|-------|------|------|
+| 0 | Research + dependency + conftest | 30 min |
+| 1 | Test writing (tasks 1–5) | 1.5 h |
+| 2 | Registry + factory refactor | 1 h |
+| 3 | Capabilities adjustments (conditional) | 30 min |
+| 4 | Documentation | 1.5 h |
+| 5 | Smoke test + final verification | 30 min |
 
-**Total:** ~6-7 hours for full implementation + testing + docs
+**Total:** ~5.5 hours.
 
 ---
 
-# Ready to Execute
+## Notes for the Implementer
 
-Plan is complete. Two execution options:
+- **Mocking philosophy:** Follow `test_minimax.py` and `test_capabilities.py`.
+  Inspect bound kwargs and request payloads — do NOT mock HTTP. The repo
+  uses `monkeypatch.setenv()` for env vars (per `conftest.py` convention),
+  not `@patch.dict`.
+- **Backward compatibility is sacrosanct.** The factory's public API
+  signature is unchanged; every legacy provider call must keep working.
+- **Base-URL duplication:** `_PROVIDER_BASE_URL` in `openai_client.py`
+  and the `openai_compatible` dict in `provider_registry.py` will hold
+  the same URLs. Keep them in sync; consider a follow-up to consolidate.
+  Don't try to fix it in this PR — the duplication is contained and
+  removing it cleanly requires a separate refactor.
+- **Async tests** rely on `pytest-asyncio` with `asyncio_mode = "auto"`.
+  If you see "async def function ... not natively supported", the dep
+  isn't installed or the mode isn't set.
 
-**Option 1: Subagent-Driven (Recommended)**
-- Fresh subagent per task
-- I review between tasks
-- Faster iteration
-- Requires: `superpowers:subagent-driven-development`
+---
 
-**Option 2: Inline Execution**
-- Execute tasks in this session
-- Batch execution with checkpoints
-- Requires: `superpowers:executing-plans`
+## Two Execution Options
 
-**Which approach do you prefer?**
+**1. Subagent-Driven (recommended)** — Fresh subagent per task, review
+between tasks, fastest iteration.  
+**REQUIRED SUB-SKILL:** `superpowers:subagent-driven-development`
+
+**2. Inline Execution** — Execute in this session with checkpoints.  
+**REQUIRED SUB-SKILL:** `superpowers:executing-plans`
+
+**Which approach?**
